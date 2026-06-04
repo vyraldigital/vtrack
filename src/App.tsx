@@ -919,10 +919,10 @@ export default function App() {
   // 7. Render Layouts
   if (loading) {
     return (
-      <div className="flex h-screen items-center justify-center bg-[#F7F8FC]">
-        <div className="flex flex-col items-center gap-3">
-          <RefreshCw className="h-8 w-8 text-[#3B82F6] animate-spin" />
-          <p className="text-[13px] font-semibold text-[#667085]">Loading tracker...</p>
+      <div className="flex h-screen items-center justify-center bg-slate-950 text-slate-50">
+        <div className="flex flex-col items-center gap-4">
+          <RefreshCw className="h-10 w-10 text-blue-500 animate-spin" />
+          <p className="text-[13px] font-medium tracking-wide text-slate-400">Loading vTrack...</p>
         </div>
       </div>
     )
@@ -931,39 +931,39 @@ export default function App() {
   // A. First-run Consent Screen
   if (session && !consentGranted) {
     return (
-      <div className="flex flex-col h-screen bg-white p-6 justify-between select-none">
-        <div className="space-y-4">
-          <div className="flex items-center gap-2 text-[#3B82F6]">
-            <Fingerprint className="h-7 w-7" />
-            <h1 className="text-[20px] font-bold text-[#111827]">vOps Tracker Consent</h1>
+      <div className="flex flex-col h-screen bg-slate-950 text-slate-50 p-6 justify-between select-none">
+        <div className="space-y-6">
+          <div className="flex items-center gap-3 text-blue-400">
+            <Fingerprint className="h-8 w-8" />
+            <h1 className="text-[22px] font-semibold text-white tracking-tight">vTrack Consent</h1>
           </div>
-          <p className="text-[13px] text-[#667085] leading-relaxed">
-            Vyral Operations System uses this desktop companion to record attendance and monitor focus sessions.
+          <p className="text-[14px] text-slate-400 leading-relaxed font-light">
+            Vyral Operations System uses this desktop companion to securely record attendance and monitor focus sessions.
           </p>
 
-          <div className="space-y-3 bg-[#F7F8FC] p-4 rounded-xl border border-[#E6E8EF] text-[12px] text-[#667085]">
-            <div className="flex gap-2">
-              <span className="text-[#16A34A] font-bold">✓</span>
-              <span><strong>Attendance Session:</strong> Logs your Clock In / Out timestamps.</span>
+          <div className="space-y-4 bg-white/5 backdrop-blur-xl p-5 rounded-2xl border border-white/10 text-[13px] text-slate-300 font-light shadow-2xl">
+            <div className="flex gap-3">
+              <span className="text-emerald-400 font-bold">✓</span>
+              <span><strong className="text-white font-medium">Attendance Session:</strong> Logs your Clock In / Out timestamps.</span>
             </div>
-            <div className="flex gap-2">
-              <span className="text-[#16A34A] font-bold">✓</span>
-              <span><strong>Background Heartbeat:</strong> Updates your status every 60 seconds.</span>
+            <div className="flex gap-3">
+              <span className="text-emerald-400 font-bold">✓</span>
+              <span><strong className="text-white font-medium">Background Heartbeat:</strong> Updates your status every 60 seconds.</span>
             </div>
-            <div className="flex gap-2">
-              <span className="text-[#16A34A] font-bold">✓</span>
-              <span><strong>Keystrokes:</strong> Key counts are recorded for activity metrics, but actual key content is <strong>never</strong> logged.</span>
+            <div className="flex gap-3">
+              <span className="text-emerald-400 font-bold">✓</span>
+              <span><strong className="text-white font-medium">Keystrokes:</strong> Key counts are recorded for activity metrics, but actual key content is <strong className="text-rose-400 font-medium">never</strong> logged.</span>
             </div>
-            <div className="flex gap-2">
-              <span className="text-[#16A34A] font-bold">✓</span>
-              <span><strong>Zero Tracking Out-of-Hours:</strong> All tracking schedule terminates completely when you Clock Out.</span>
+            <div className="flex gap-3">
+              <span className="text-emerald-400 font-bold">✓</span>
+              <span><strong className="text-white font-medium">Zero Tracking Out-of-Hours:</strong> All tracking completely terminates when you Clock Out.</span>
             </div>
           </div>
         </div>
 
         <button 
           onClick={handleGrantConsent} 
-          className="w-full h-11 bg-[#3B82F6] text-white rounded-xl text-[14px] font-semibold hover:bg-[#2563EB] active:scale-98 transition-all shadow-sm"
+          className="w-full h-12 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-[14px] font-medium active:scale-[0.98] transition-all shadow-lg shadow-blue-500/20"
         >
           I Consent & Agree
         </button>
@@ -974,51 +974,50 @@ export default function App() {
   // B. Login Screen
   if (!session) {
     return (
-      <div className="flex flex-col h-screen justify-center px-6 py-12 bg-[#F7F8FC]">
-        <div className="sm:mx-auto sm:w-full sm:max-w-sm space-y-5">
+      <div className="flex flex-col h-screen justify-center px-6 py-12 bg-slate-950 text-slate-50 select-none">
+        <div className="sm:mx-auto sm:w-full sm:max-w-sm space-y-8">
           <div className="flex flex-col items-center">
-            <div className="h-12 w-12 rounded-2xl bg-white border border-[#E6E8EF] flex items-center justify-center text-[#3B82F6] shadow-sm">
-              <Fingerprint className="h-6 w-6" />
+            <div className="h-16 w-16 rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-600 p-[1px] shadow-lg shadow-blue-500/30">
+              <div className="h-full w-full bg-slate-900 rounded-2xl flex items-center justify-center">
+                <Fingerprint className="h-8 w-8 text-blue-400" />
+              </div>
             </div>
-            <h2 className="mt-4 text-center text-[20px] font-bold tracking-tight text-[#111827]">
-              vOps Tracker Login
+            <h2 className="mt-6 text-center text-[24px] font-semibold tracking-tight text-white">
+              vTrack Login
             </h2>
-            <p className="text-[12px] text-[#667085] mt-1">Sign in with your vOps credentials</p>
+            <p className="text-[14px] text-slate-400 mt-2 font-light">Sign in with your vOps credentials</p>
           </div>
 
-          <form className="space-y-4" onSubmit={handleLogin}>
+          <form className="space-y-5" onSubmit={handleLogin}>
             {authError && (
-              <div className="p-3 bg-red-50 border border-red-100 rounded-xl flex gap-2 items-start text-[12px] text-red-600">
-                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
-                <span>{authError}</span>
+              <div className="p-4 bg-rose-500/10 border border-rose-500/20 rounded-xl flex gap-3 items-start text-[13px] text-rose-400 backdrop-blur-md">
+                <AlertTriangle className="h-5 w-5 shrink-0 mt-0.5 text-rose-500" />
+                <span className="font-medium">{authError}</span>
               </div>
             )}
 
-            <div>
+            <div className="space-y-3">
               <input
                 type="email"
                 required
                 placeholder="Email Address"
                 value={email}
                 onChange={e => setEmail(e.target.value)}
-                className="w-full h-11 px-3.5 rounded-xl border border-[#E6E8EF] bg-white text-[13px] text-[#111827] focus:outline-none focus:ring-2 focus:ring-[#3B82F6]/20 placeholder:text-[#98A2B3]"
+                className="w-full h-12 px-4 rounded-xl border border-white/10 bg-white/5 backdrop-blur-md text-[14px] text-white focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 placeholder:text-slate-500 transition-all font-light"
               />
-            </div>
-
-            <div>
               <input
                 type="password"
                 required
                 placeholder="Password"
                 value={password}
                 onChange={e => setPassword(e.target.value)}
-                className="w-full h-11 px-3.5 rounded-xl border border-[#E6E8EF] bg-white text-[13px] text-[#111827] focus:outline-none focus:ring-2 focus:ring-[#3B82F6]/20 placeholder:text-[#98A2B3]"
+                className="w-full h-12 px-4 rounded-xl border border-white/10 bg-white/5 backdrop-blur-md text-[14px] text-white focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 placeholder:text-slate-500 transition-all font-light"
               />
             </div>
 
             <button
               type="submit"
-              className="w-full h-11 bg-[#111827] text-white rounded-xl text-[13px] font-semibold hover:bg-black active:scale-98 transition-all shadow-sm"
+              className="w-full h-12 bg-white text-slate-900 rounded-xl text-[14px] font-semibold hover:bg-slate-200 active:scale-[0.98] transition-all shadow-lg"
             >
               Sign In
             </button>
@@ -1031,45 +1030,45 @@ export default function App() {
   // C. Stale Recovery Prompt Screen
   if (recoverySession) {
     return (
-      <div className="flex flex-col h-screen bg-[#F7F8FC] p-6 justify-between select-none">
-        <div className="space-y-4 text-center my-auto">
-          <div className="h-12 w-12 rounded-2xl bg-yellow-50 border border-yellow-100 flex items-center justify-center text-[#D97706] mx-auto shadow-sm">
-            <Clock className="h-6 w-6" />
+      <div className="flex flex-col h-screen bg-slate-950 text-slate-50 p-6 justify-between select-none">
+        <div className="space-y-5 text-center my-auto">
+          <div className="h-16 w-16 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-500 mx-auto shadow-lg shadow-amber-500/10">
+            <Clock className="h-8 w-8" />
           </div>
-          <h2 className="text-[18px] font-bold text-[#111827]">Previous session needs review</h2>
-          <p className="text-[12px] text-[#667085] leading-relaxed px-2">
+          <h2 className="text-[20px] font-semibold text-white tracking-tight">Previous session needs review</h2>
+          <p className="text-[13px] text-slate-400 leading-relaxed px-4 font-light">
             Your last attendance session is still active, but the heartbeat was missed. Choose how you want to continue.
           </p>
-          <div className="bg-white p-3.5 rounded-xl border border-[#E6E8EF] text-left text-[11px] text-[#667085] space-y-1.5 max-w-sm mx-auto">
-            <p><strong>Clocked In:</strong> {new Date(recoverySession.clock_in).toLocaleString()}</p>
-            <p><strong>Last Heartbeat:</strong> {new Date(recoverySession.updated_at).toLocaleString()}</p>
+          <div className="bg-white/5 backdrop-blur-md p-4 rounded-xl border border-white/10 text-left text-[12px] text-slate-300 space-y-2 max-w-sm mx-auto shadow-xl">
+            <p><strong className="text-white font-medium">Clocked In:</strong> {new Date(recoverySession.clock_in).toLocaleString()}</p>
+            <p><strong className="text-white font-medium">Last Heartbeat:</strong> {new Date(recoverySession.updated_at).toLocaleString()}</p>
           </div>
           {syncError && (
-            <p className="text-[11px] text-[#EF4444] font-medium bg-red-50 border border-red-100 rounded-lg p-2 max-w-sm mx-auto">
+            <p className="text-[12px] text-rose-400 font-medium bg-rose-500/10 border border-rose-500/20 rounded-lg p-3 max-w-sm mx-auto">
               {syncError}
             </p>
           )}
         </div>
 
-        <div className="space-y-2">
+        <div className="space-y-3">
           <button 
             onClick={() => handleResolveRecovery('continue')} 
             disabled={syncing}
-            className="w-full h-10 bg-[#3B82F6] text-white rounded-xl text-[13px] font-semibold hover:bg-[#2563EB] disabled:opacity-50 transition-all shadow-sm"
+            className="w-full h-12 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-[14px] font-medium disabled:opacity-50 transition-all shadow-lg shadow-blue-500/20 active:scale-[0.98]"
           >
             Continue Session
           </button>
           <button 
             onClick={() => handleResolveRecovery('lastseen')} 
             disabled={syncing}
-            className="w-full h-10 bg-white border border-[#E6E8EF] text-[#667085] hover:bg-[#F7F8FC] rounded-xl text-[13px] font-semibold disabled:opacity-50 transition-all shadow-sm"
+            className="w-full h-12 bg-white/5 border border-white/10 text-slate-300 hover:bg-white/10 rounded-xl text-[14px] font-medium disabled:opacity-50 transition-all shadow-lg active:scale-[0.98]"
           >
             Clock Out at Last Seen
           </button>
           <button 
             onClick={() => handleResolveRecovery('now')} 
             disabled={syncing}
-            className="w-full h-10 bg-white border border-[#E6E8EF] text-[#667085] hover:bg-[#F7F8FC] rounded-xl text-[13px] font-semibold disabled:opacity-50 transition-all shadow-sm"
+            className="w-full h-12 bg-white/5 border border-white/10 text-slate-300 hover:bg-white/10 rounded-xl text-[14px] font-medium disabled:opacity-50 transition-all shadow-lg active:scale-[0.98]"
           >
             Clock Out Now
           </button>
@@ -1103,51 +1102,53 @@ export default function App() {
   const allPermissionsGranted = permissions.screen === 'granted' && permissions.accessibility === 'granted'
 
   return (
-    <div className="flex flex-col h-screen bg-[#F7F8FC] justify-between select-none">
+    <div className="flex flex-col h-screen bg-slate-950 text-slate-50 justify-between select-none">
       {/* Top Header */}
-      <div className="flex items-center justify-between px-5 py-4 border-b border-[#E6E8EF] bg-white shadow-sm shrink-0">
-        <div className="flex items-center gap-2">
-          <div className="h-7 w-7 rounded-lg bg-[#EEF4FF] text-[#3B82F6] flex items-center justify-center">
-            <Fingerprint className="h-4.5 w-4.5" />
+      <div className="flex items-center justify-between px-5 py-4 border-b border-white/10 bg-slate-950 shadow-sm shrink-0">
+        <div className="flex items-center gap-3">
+          <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 p-[1px] shadow-lg shadow-blue-500/20 flex items-center justify-center">
+             <div className="h-full w-full bg-slate-900 rounded-lg flex items-center justify-center">
+               <Fingerprint className="h-5 w-5 text-blue-400" />
+             </div>
           </div>
           <div>
-            <h1 className="text-[14px] font-bold text-[#111827]">vOps Tracker</h1>
-            <p className="text-[9px] text-[#98A2B3]">Vyral Operations System</p>
+            <h1 className="text-[14px] font-semibold text-white tracking-tight">vTrack</h1>
+            <p className="text-[10px] text-slate-400 font-light">Vyral Operations System</p>
           </div>
         </div>
         <button 
           onClick={handleLogout} 
-          className="h-8 px-2.5 rounded-lg border border-[#E6E8EF] text-[#667085] hover:text-[#EF4444] hover:bg-red-50 flex items-center gap-1.5 text-[11px] font-semibold transition-all"
+          className="h-8 px-3 rounded-lg border border-white/10 text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 hover:border-rose-500/20 flex items-center gap-1.5 text-[11px] font-medium transition-all"
         >
           <LogOut className="h-3.5 w-3.5" /> Logout
         </button>
       </div>
 
       {/* Main Content Area */}
-      <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+      <div className="flex-1 overflow-y-auto px-5 py-5 space-y-5">
         {/* Editor Profile Details */}
-        <div className="bg-white p-3 rounded-xl border border-[#E6E8EF] flex items-center gap-3">
-          <div className="h-9 w-9 rounded-full bg-[#F1F4FA] text-[#667085] flex items-center justify-center shrink-0">
-            <User className="h-4 w-4" />
+        <div className="bg-white/5 backdrop-blur-md p-3.5 rounded-2xl border border-white/10 flex items-center gap-3 shadow-lg">
+          <div className="h-10 w-10 rounded-full bg-slate-800 border border-white/10 text-slate-400 flex items-center justify-center shrink-0 shadow-inner">
+            <User className="h-4.5 w-4.5" />
           </div>
           <div className="min-w-0">
-            <p className="text-[12px] font-semibold text-[#111827] truncate">{profile?.name}</p>
-            <p className="text-[10px] text-[#667085] truncate">{profile?.email}</p>
+            <p className="text-[13px] font-medium text-white truncate tracking-wide">{profile?.name}</p>
+            <p className="text-[11px] text-slate-400 truncate font-light">{profile?.email}</p>
           </div>
         </div>
 
         {/* Sync errors block */}
         {syncError && (
-          <div className="p-3 bg-red-50 border border-red-100 rounded-xl text-[11px] text-red-600 flex flex-col gap-2">
+          <div className="p-4 bg-rose-500/10 border border-rose-500/20 rounded-2xl text-[12px] text-rose-400 flex flex-col gap-2 backdrop-blur-md">
             <div className="flex gap-2 items-start">
-              <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-              <span>{syncError}</span>
+              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+              <span className="font-medium">{syncError}</span>
             </div>
             {syncError.includes('Clock Out') && (
               <button
                 onClick={handleClockOut}
                 disabled={syncing}
-                className="self-start text-[10px] text-[#3B82F6] font-semibold hover:underline"
+                className="self-start text-[11px] text-rose-300 font-semibold hover:text-rose-200 transition-colors"
               >
                 Retry Clock Out
               </button>
@@ -1156,7 +1157,7 @@ export default function App() {
               <button
                 onClick={handleClockIn}
                 disabled={syncing}
-                className="self-start text-[10px] text-[#3B82F6] font-semibold hover:underline"
+                className="self-start text-[11px] text-rose-300 font-semibold hover:text-rose-200 transition-colors"
               >
                 Retry Clock In
               </button>
@@ -1166,25 +1167,28 @@ export default function App() {
 
         {/* Today's Date */}
         <div className="flex items-center gap-2 px-1">
-          <Calendar className="h-3.5 w-3.5 text-[#98A2B3]" />
-          <p className="text-[11px] font-semibold text-[#667085]">{todayDateStr}</p>
+          <Calendar className="h-4 w-4 text-slate-500" />
+          <p className="text-[12px] font-medium tracking-wide text-slate-400">{todayDateStr}</p>
         </div>
 
         {/* Large Timer Visualizer */}
-        <div className="bg-white p-5 rounded-2xl border border-[#E6E8EF] text-center space-y-1">
-          <p className="text-[11px] font-bold uppercase tracking-wider text-[#98A2B3]">
+        <div className="bg-slate-900/50 backdrop-blur-xl p-6 rounded-3xl border border-white/10 text-center space-y-2 relative overflow-hidden shadow-2xl">
+          {isClockedIn && <div className="absolute -top-24 -left-24 w-48 h-48 bg-blue-500/20 rounded-full blur-3xl animate-pulse-slow"></div>}
+          {isClockedIn && <div className="absolute -bottom-24 -right-24 w-48 h-48 bg-emerald-500/10 rounded-full blur-3xl animate-pulse-slow" style={{ animationDelay: '1s' }}></div>}
+          
+          <p className="text-[11px] font-medium uppercase tracking-widest text-slate-400 relative z-10">
             {isClockedIn ? 'Clocked In Duration' : 'Not Clocked In'}
           </p>
-          <h2 className={`text-[32px] font-bold font-mono tracking-tight ${isClockedIn ? 'text-[#111827]' : 'text-[#98A2B3]'}`}>
+          <h2 className={`text-[40px] font-light font-mono tracking-tighter relative z-10 ${isClockedIn ? 'text-white drop-shadow-[0_0_15px_rgba(255,255,255,0.3)]' : 'text-slate-600'}`}>
             {timerStr}
           </h2>
-          <div className="flex justify-center pt-2">
+          <div className="flex justify-center pt-2 relative z-10">
             {isClockedIn ? (
-              <span className="flex items-center gap-1 bg-[#DCFCE7] text-[#16A34A] px-2 py-0.5 rounded-full text-[10px] font-bold uppercase">
-                <span className="h-1.5 w-1.5 rounded-full bg-[#16A34A] animate-pulse" /> Live Tracking
+              <span className="flex items-center gap-1.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider backdrop-blur-md shadow-[0_0_10px_rgba(16,185,129,0.2)]">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" /> Live Tracking
               </span>
             ) : (
-              <span className="flex items-center gap-1 bg-[#F1F4FA] text-[#667085] px-2 py-0.5 rounded-full text-[10px] font-bold uppercase">
+              <span className="flex items-center gap-1.5 bg-white/5 border border-white/10 text-slate-500 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider">
                 Offline
               </span>
             )}
@@ -1192,12 +1196,12 @@ export default function App() {
         </div>
 
         {/* Today's Total Time Card */}
-        <div className="bg-white p-4 rounded-xl border border-[#E6E8EF] space-y-2">
+        <div className="bg-white/5 backdrop-blur-md p-4 rounded-2xl border border-white/10 space-y-3 shadow-lg">
           <div className="flex items-center justify-between">
-            <p className="text-[9px] font-bold text-[#98A2B3] uppercase tracking-wider flex items-center gap-1">
-              <Clock className="h-3 w-3" /> Today's Total
+            <p className="text-[10px] font-medium text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
+              <Clock className="h-3.5 w-3.5" /> Today's Total
             </p>
-            <p className="text-[18px] font-bold text-[#111827] font-mono">
+            <p className="text-[20px] font-light text-white font-mono tracking-tight">
               {formatTotalTime(completedMinutesToday + (isClockedIn ? Math.floor((Date.now() - new Date(activeSession!.clock_in).getTime()) / 60000) : 0))}
             </p>
           </div>
@@ -1205,25 +1209,25 @@ export default function App() {
             <>
               <button
                 onClick={() => setShowSessionHistory(!showSessionHistory)}
-                className="flex items-center gap-1 text-[10px] text-[#3B82F6] font-semibold hover:underline"
+                className="flex items-center gap-1.5 text-[11px] text-blue-400 font-medium hover:text-blue-300 transition-colors"
               >
-                <History className="h-3 w-3" />
+                <History className="h-3.5 w-3.5" />
                 {showSessionHistory ? 'Hide' : 'Show'} Sessions ({todaySessions.length})
-                {showSessionHistory ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                {showSessionHistory ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
               </button>
               {showSessionHistory && (
-                <div className="space-y-1 pt-1 border-t border-[#F1F4FA]">
+                <div className="space-y-1.5 pt-2 border-t border-white/10">
                   {todaySessions.map(s => {
                     const clockIn = new Date(s.clock_in)
                     const clockOut = s.clock_out ? new Date(s.clock_out) : null
                     const fmtTime = (d: Date) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
                     const duration = s.total_minutes ? formatTotalTime(s.total_minutes) : (s.status === 'active' ? 'running' : '–')
                     return (
-                      <div key={s.id} className="flex items-center justify-between text-[10px] py-1">
-                        <span className="text-[#667085]">
-                          {fmtTime(clockIn)} → {clockOut ? fmtTime(clockOut) : <span className="text-[#16A34A] font-semibold">Now</span>}
+                      <div key={s.id} className="flex items-center justify-between text-[11px] py-1">
+                        <span className="text-slate-400 font-mono tracking-tight">
+                          {fmtTime(clockIn)} → {clockOut ? fmtTime(clockOut) : <span className="text-emerald-400 font-medium drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]">Now</span>}
                         </span>
-                        <span className={`font-semibold ${s.status === 'active' ? 'text-[#16A34A]' : 'text-[#111827]'}`}>
+                        <span className={`font-mono ${s.status === 'active' ? 'text-emerald-400 font-medium' : 'text-slate-300'}`}>
                           {duration}
                         </span>
                       </div>
@@ -1234,66 +1238,69 @@ export default function App() {
             </>
           )}
           {todaySessions.length === 0 && !isClockedIn && (
-            <p className="text-[10px] text-[#98A2B3]">No sessions logged today yet.</p>
+            <p className="text-[11px] text-slate-500 font-light">No sessions logged today yet.</p>
           )}
         </div>
 
-        {/* Active Web Task Section */}
-        <div className="bg-white p-3 rounded-xl border border-[#E6E8EF] space-y-1.5">
-          <p className="text-[9px] font-bold text-[#98A2B3] uppercase tracking-wider">Active Web Task</p>
-          <div className="flex items-center gap-2">
-            <div className={`h-2 w-2 rounded-full shrink-0 ${isClockedIn && activeWebTask !== 'No active web task' ? 'bg-[#3B82F6]' : 'bg-[#98A2B3]'}`} />
-            <p className="text-[12px] font-medium text-[#111827] truncate">
-              {activeWebTask}
-            </p>
-          </div>
-        </div>
-
-        {/* Activity Tracking Status */}
-        {profile?.activity_tracking_enabled && (
-          <div className="bg-white p-3 rounded-xl border border-[#E6E8EF] space-y-1.5">
-            <p className="text-[9px] font-bold text-[#98A2B3] uppercase tracking-wider">Activity Status</p>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <div className={`h-2 w-2 rounded-full shrink-0 ${
-                  activityStatus === 'Active' ? 'bg-[#10B981]' : 
-                  activityStatus === 'Idle' ? 'bg-[#F59E0B]' : 'bg-[#98A2B3]'
-                }`} />
-                <p className="text-[12px] font-medium text-[#111827] truncate">
-                  {activityStatus === 'Disabled' ? 'Tracking Disabled' : activityStatus}
-                </p>
-              </div>
-              {activityStatus !== 'Disabled' && (
-                <div className="text-[11px] font-semibold text-[#667085]">
-                  {activePercentage}% Active
-                </div>
-              )}
+        {/* Secondary Metrics Grid */}
+        <div className="grid grid-cols-2 gap-3">
+          {/* Active Web Task Section */}
+          <div className="bg-white/5 backdrop-blur-md p-3.5 rounded-2xl border border-white/10 space-y-2 shadow-lg">
+            <p className="text-[9px] font-medium text-slate-400 uppercase tracking-widest">Active Task</p>
+            <div className="flex items-center gap-2">
+              <div className={`h-2 w-2 rounded-full shrink-0 shadow-lg ${isClockedIn && activeWebTask !== 'No active web task' ? 'bg-blue-400 shadow-blue-400/50' : 'bg-slate-600'}`} />
+              <p className="text-[12px] font-medium text-white truncate tracking-wide">
+                {activeWebTask}
+              </p>
             </div>
           </div>
-        )}
+
+          {/* Activity Tracking Status */}
+          {profile?.activity_tracking_enabled && (
+            <div className="bg-white/5 backdrop-blur-md p-3.5 rounded-2xl border border-white/10 space-y-2 shadow-lg">
+              <p className="text-[9px] font-medium text-slate-400 uppercase tracking-widest">Activity</p>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className={`h-2 w-2 rounded-full shrink-0 shadow-lg ${
+                    activityStatus === 'Active' ? 'bg-emerald-400 shadow-emerald-400/50' : 
+                    activityStatus === 'Idle' ? 'bg-amber-400 shadow-amber-400/50' : 'bg-slate-600'
+                  }`} />
+                  <p className="text-[12px] font-medium text-white truncate tracking-wide">
+                    {activityStatus === 'Disabled' ? 'Disabled' : activityStatus}
+                  </p>
+                </div>
+                {activityStatus !== 'Disabled' && (
+                  <div className="text-[10px] font-bold text-slate-400 font-mono">
+                    {activePercentage}%
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
 
         {/* Permissions & OS Checklist */}
-        <div className="bg-white p-3 rounded-xl border border-[#E6E8EF] space-y-2">
-          <p className="text-[9px] font-bold text-[#98A2B3] uppercase tracking-wider flex items-center gap-1">
-            <ShieldCheck className={`h-3.5 w-3.5 ${allPermissionsGranted ? 'text-[#10B981]' : 'text-[#F59E0B]'}`} /> Hardware Permissions
+        <div className="bg-white/5 backdrop-blur-md p-4 rounded-2xl border border-white/10 space-y-3 shadow-lg">
+          <p className="text-[10px] font-medium text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
+            <ShieldCheck className={`h-4 w-4 ${allPermissionsGranted ? 'text-emerald-400 drop-shadow-[0_0_8px_rgba(16,185,129,0.3)]' : 'text-amber-400'}`} /> Permissions
           </p>
           
           {allPermissionsGranted ? (
-            <div className="flex items-center gap-1.5 text-[11px] text-[#16A34A] font-semibold">
-              <span className="text-[#16A34A]">✓</span> All permissions granted
+            <div className="flex items-center gap-2 text-[12px] text-emerald-400 font-medium">
+              <span className="text-emerald-400 font-bold">✓</span> All permissions granted
             </div>
           ) : (
-            <div className="space-y-1.5 text-[11px]">
-              <div className="flex items-center justify-between py-1 border-b border-[#F7F8FC]">
-                <span className="text-[#667085]">Screen Capture</span>
-                <div className="flex items-center gap-1.5">
-                  <span className={`font-semibold capitalize ${permissions.screen === 'granted' ? 'text-[#16A34A]' : 'text-red-500'}`}>
+            <div className="space-y-2 text-[12px]">
+              <div className="flex items-center justify-between py-1.5 border-b border-white/5">
+                <span className="text-slate-300 font-light">Screen Capture</span>
+                <div className="flex items-center gap-2">
+                  <span className={`font-medium capitalize ${permissions.screen === 'granted' ? 'text-emerald-400' : 'text-rose-400'}`}>
                     {permissions.screen}
                   </span>
                   {permissions.screen !== 'granted' && (
                     <button 
                       onClick={() => requestPermission('screen')} 
-                      className="text-[10px] text-[#3B82F6] hover:underline"
+                      className="text-[11px] text-blue-400 hover:text-blue-300 font-medium transition-colors"
                     >
                       Allow
                     </button>
@@ -1301,16 +1308,16 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="flex items-center justify-between py-1">
-                <span className="text-[#667085]">Accessibility (Events)</span>
-                <div className="flex items-center gap-1.5">
-                  <span className={`font-semibold capitalize ${permissions.accessibility === 'granted' ? 'text-[#16A34A]' : 'text-red-500'}`}>
+              <div className="flex items-center justify-between py-1.5">
+                <span className="text-slate-300 font-light">Accessibility</span>
+                <div className="flex items-center gap-2">
+                  <span className={`font-medium capitalize ${permissions.accessibility === 'granted' ? 'text-emerald-400' : 'text-rose-400'}`}>
                     {permissions.accessibility}
                   </span>
                   {permissions.accessibility !== 'granted' && (
                     <button 
                       onClick={() => requestPermission('accessibility')} 
-                      className="text-[10px] text-[#3B82F6] hover:underline"
+                      className="text-[11px] text-blue-400 hover:text-blue-300 font-medium transition-colors"
                     >
                       Allow
                     </button>
@@ -1323,13 +1330,13 @@ export default function App() {
       </div>
 
       {/* Clock In / Out Toggle Button & Footer */}
-      <div className="p-5 bg-white border-t border-[#E6E8EF] shadow-md flex flex-col gap-3 shrink-0">
+      <div className="p-5 bg-slate-950/80 backdrop-blur-xl border-t border-white/10 shadow-[0_-10px_30px_rgba(0,0,0,0.5)] flex flex-col gap-4 shrink-0 z-20">
         
         {/* Phase 4D: Sync Manager UI */}
         {(queueStats.pendingCount > 0 || queueStats.failedCount > 0 || !isOnline) && (
-          <div className="flex items-center justify-between bg-[#F7F8FC] p-2.5 rounded-xl border border-[#E6E8EF]">
-            <div className="flex items-center gap-2 text-[11px] text-[#667085] font-medium">
-              <RefreshCw className={`h-3.5 w-3.5 ${!isOnline ? 'text-gray-400' : (queueStats.pendingCount > 0 ? 'text-[#3B82F6] animate-spin' : 'text-[#16A34A]')}`} />
+          <div className="flex items-center justify-between bg-white/5 backdrop-blur-md p-3 rounded-xl border border-white/10 shadow-inner">
+            <div className="flex items-center gap-2 text-[11px] text-slate-300 font-medium">
+              <RefreshCw className={`h-4 w-4 ${!isOnline ? 'text-slate-500' : (queueStats.pendingCount > 0 ? 'text-blue-400 animate-spin' : 'text-emerald-400')}`} />
               <span>
                 {!isOnline ? 'Offline: Data queued locally' : 
                  (queueStats.pendingCount > 0 ? `Syncing ${queueStats.pendingCount} items...` : 'Sync complete')}
@@ -1343,7 +1350,7 @@ export default function App() {
                     startSyncManager()
                   }
                 }}
-                className="text-[10px] text-white bg-[#EF4444] px-2 py-1 rounded-lg font-bold hover:bg-[#DC2626]"
+                className="text-[10px] text-white bg-rose-500/20 border border-rose-500/30 px-2.5 py-1.5 rounded-lg font-medium hover:bg-rose-500/40 transition-colors"
               >
                 Retry {queueStats.failedCount} Failed
               </button>
@@ -1356,7 +1363,7 @@ export default function App() {
             <button
               onClick={handleClockOut}
               disabled={syncing}
-              className="flex-1 h-11 bg-[#EF4444] text-white hover:bg-[#DC2626] active:scale-98 disabled:opacity-50 font-semibold rounded-xl text-[14px] flex items-center justify-center gap-1.5 transition-all shadow-sm"
+              className="flex-1 h-12 bg-rose-600 hover:bg-rose-500 text-white active:scale-[0.98] disabled:opacity-50 font-medium rounded-xl text-[14px] flex items-center justify-center gap-2 transition-all shadow-lg shadow-rose-600/20 border border-rose-500/50"
             >
               <Square className="h-4 w-4" /> Clock Out
             </button>
@@ -1364,7 +1371,7 @@ export default function App() {
             <button
               onClick={handleClockIn}
               disabled={syncing}
-              className="flex-1 h-11 bg-[#10B981] text-white hover:bg-[#059669] active:scale-98 disabled:opacity-50 font-semibold rounded-xl text-[14px] flex items-center justify-center gap-1.5 transition-all shadow-sm"
+              className="flex-1 h-12 bg-blue-600 hover:bg-blue-500 text-white active:scale-[0.98] disabled:opacity-50 font-medium rounded-xl text-[14px] flex items-center justify-center gap-2 transition-all shadow-lg shadow-blue-600/20 border border-blue-500/50"
             >
               <Play className="h-4 w-4 fill-white ml-0.5" /> Clock In
             </button>
@@ -1372,17 +1379,17 @@ export default function App() {
         </div>
 
         {/* Footer info: Last Sync and Version */}
-        <div className="flex justify-between items-center text-[10px] text-[#98A2B3] px-1 pt-1 select-none">
+        <div className="flex justify-between items-center text-[10px] text-slate-500 font-light px-1 select-none tracking-wide">
           <div>
             {isClockedIn && (
               heartbeatFailed ? (
-                <span className="text-red-500 font-semibold animate-pulse">Sync issue. Retrying...</span>
+                <span className="text-rose-400 font-medium animate-pulse">Sync issue. Retrying...</span>
               ) : (
                 <span>Last Sync: {lastSyncTime || 'Pending...'}</span>
               )
             )}
           </div>
-          <div>vOps Tracker v0.5A</div>
+          <div>vTrack v0.5.1A</div>
         </div>
       </div>
     </div>
