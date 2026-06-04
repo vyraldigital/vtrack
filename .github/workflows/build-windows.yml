@@ -27,7 +27,7 @@ jobs:
         run: npm ci
 
       - name: Build and Package (Windows)
-        run: npm run build && npm run package -- --win --x64
+        run: npm run build && npm run package -- --win --x64 --publish never
 
       # Create a GitHub Release and attach the .exe as a permanent download.
       # Tag: build-<run_number>  (e.g. build-7)
