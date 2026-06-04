@@ -1,0 +1,45 @@
+name: Build Windows App
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+# Required to create releases and upload assets
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and Package (Windows)
+        run: npm run build && npm run package -- --win --x64
+
+      # Create a GitHub Release and attach the .exe as a permanent download.
+      # Tag: build-<run_number>  (e.g. build-7)
+      # Editors download from: Releases → latest → Assets
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "vTrack build ${{ github.run_number }}"
+          body: |
+            Automated Windows build from commit ${{ github.sha }}
+
+            **Install:** Download the `.exe` below → run it → click "More info → Run anyway" if Windows SmartScreen appears.
+          files: dist-packaged/*.exe
+          make_latest: true
