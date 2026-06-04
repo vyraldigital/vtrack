@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   getDeviceInfo: () => ipcRenderer.invoke('get-device-info'),
   getPermissionsStatus: () => ipcRenderer.invoke('get-permissions-status'),
   requestSystemPermissions: (type) => ipcRenderer.invoke('request-system-permissions', type),

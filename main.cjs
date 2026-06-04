@@ -338,6 +338,10 @@ ipcMain.handle('get-device-info', () => {
   };
 });
 
+ipcMain.handle('get-app-version', () => {
+  return app.getVersion();
+});
+
 // IPC Handler: Permissions
 ipcMain.handle('get-permissions-status', () => {
   return getPermissions();

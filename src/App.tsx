@@ -52,6 +52,8 @@ type TodaySession = {
 
 export default function App() {
   const [session, setSession] = useState<any>(null)
+  const [updaterStatus, setUpdaterStatus] = useState<string | null>(null)
+  const [appVersion, setAppVersion] = useState<string | null>(null)
   const [profile, setProfile] = useState<Profile | null>(null)
   const [loading, setLoading] = useState(true)
   const [email, setEmail] = useState('')
@@ -89,6 +91,10 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    if (window.electronAPI?.getAppVersion) {
+      window.electronAPI.getAppVersion().then(setAppVersion)
+    }
+
     if (window.electronAPI?.onUpdaterStatus) {
       return window.electronAPI.onUpdaterStatus((text: string) => {
         setUpdaterStatus(text)
@@ -1414,7 +1420,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-3">
             {updaterStatus && <span className="text-blue-400 font-medium animate-pulse">{updaterStatus}</span>}
-            <span>vTrack v0.5.1A</span>
+            <span>vTrack v{appVersion || '...'}</span>
           </div>
         </div>
       </div>
