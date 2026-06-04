@@ -74,10 +74,7 @@ export default function App() {
   const [showSessionHistory, setShowSessionHistory] = useState(false)
   const [activityStatus, setActivityStatus] = useState<'Active' | 'Idle' | 'Disabled'>('Disabled')
   const [activePercentage, setActivePercentage] = useState<number>(0)
-  
-  const [updaterStatus, setUpdaterStatus] = useState<string | null>(null)
 
-  // Add cleanup for electron event listeners
   useEffect(() => {
     if (window.electronAPI?.onPowerStateChange) {
       return window.electronAPI.onPowerStateChange((state: string) => {
@@ -832,7 +829,8 @@ export default function App() {
       if (!currActiveSession || !currSession?.user?.id) return
 
       try {
-        const stats = await window.electronAPI.getActivityStats()
+        const stats = await window.electronAPI?.getActivityStats()
+        if (!stats) return
         
         // Calculate active seconds logic
         const totalInputs = stats.keyboardCount + stats.mouseCount + stats.mouseClickCount
@@ -1418,9 +1416,23 @@ export default function App() {
               )
             )}
           </div>
+          {/* App Version Info */}
           <div className="flex items-center gap-3">
-            {updaterStatus && <span className="text-blue-400 font-medium animate-pulse">{updaterStatus}</span>}
-            <span>vTrack v{appVersion || '...'}</span>
+            {updaterStatus 
+              ? <span className={`text-[11px] font-medium animate-pulse ${updaterStatus.includes('error') || updaterStatus.includes('failed') ? 'text-rose-500' : 'text-blue-500'}`}>{updaterStatus}</span>
+              : <button
+                  onClick={async () => {
+                    if (window.electronAPI?.checkForUpdates) {
+                      setUpdaterStatus('Checking...')
+                      await window.electronAPI.checkForUpdates()
+                    }
+                  }}
+                  className="text-[11px] text-slate-400 hover:text-blue-500 transition-colors underline underline-offset-2"
+                  title="Click to manually check for updates"
+                >
+                  vTrack v{appVersion || '...'}
+                </button>
+            }
           </div>
         </div>
       </div>

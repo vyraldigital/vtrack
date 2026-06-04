@@ -1,5 +1,13 @@
 const { app, BrowserWindow, ipcMain, systemPreferences, powerMonitor, shell, dialog } = require('electron');
 const { autoUpdater } = require('electron-updater');
+const log = require('electron-log');
+
+// ─── Logging Setup ────────────────────────────────────────────────────────────
+// Logs are written to: %APPDATA%/vTrack/logs/main.log (Windows)
+// You can open this file to see exactly what the updater is doing.
+autoUpdater.logger = log;
+autoUpdater.logger.transports.file.level = 'info';
+log.info('[vTrack] App starting...');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
@@ -103,24 +111,26 @@ function getPermissions() {
 }
 
 // ─── Auto-updater ─────────────────────────────────────────────────────────────
-// Security model:
-//   • Only runs in production builds (app.isPackaged) — never in dev
-//   • Downloads silently over HTTPS from GitHub Releases
-//   • electron-updater verifies the SHA512 hash before applying — MITM-proof
-//   • Never force-installs: editor must click "Restart Now" to apply
-//   • All errors are non-fatal — a broken update check never blocks the app
+// • Only runs in production (app.isPackaged) — never in dev mode
+// • Downloads silently; SHA512 verified before install — MITM-proof
+// • User must click "Restart Now" — never force-installs
+// • All errors are non-fatal and logged to disk
+// • Logs: %APPDATA%/vTrack/logs/main.log on Windows
 // ──────────────────────────────────────────────────────────────────────────────
 function setupAutoUpdater(win) {
-  if (!app.isPackaged) return; // skip entirely in dev mode
+  if (!app.isPackaged) {
+    log.info('[updater] Skipping — app is not packaged (dev mode)');
+    return;
+  }
 
-  // Do not auto-install on quit — only install when the user explicitly approves
+  log.info('[updater] Setting up auto-updater. Current version:', app.getVersion());
+
   autoUpdater.autoInstallOnAppQuit = false;
-  // Download in background; the hash is verified before the file is used
   autoUpdater.autoDownload = true;
-  // Never install pre-release builds on stable installs
   autoUpdater.allowPrerelease = false;
 
   const sendStatus = (text) => {
+    log.info('[updater] Status:', text);
     if (win && !win.isDestroyed()) {
       win.webContents.send('updater-status', text);
     }
@@ -131,53 +141,81 @@ function setupAutoUpdater(win) {
   });
 
   autoUpdater.on('update-available', (info) => {
-    sendStatus(`Update v${info.version} available. Downloading...`);
+    log.info('[updater] Update available:', info.version);
+    sendStatus(`Update v${info.version} found! Downloading...`);
   });
 
-  autoUpdater.on('update-not-available', () => {
-    sendStatus('vTrack is up to date.');
+  autoUpdater.on('update-not-available', (info) => {
+    log.info('[updater] Already up to date. Latest:', info.version, 'Current:', app.getVersion());
+    sendStatus(`Up to date (v${app.getVersion()})`);
+    // Clear the message after 5s so it doesn't clutter the footer
+    setTimeout(() => sendStatus(''), 5000);
   });
 
   autoUpdater.on('download-progress', (progressObj) => {
-    let percent = Math.round(progressObj.percent);
+    const percent = Math.round(progressObj.percent);
     sendStatus(`Downloading update: ${percent}%`);
   });
 
-  autoUpdater.on('update-downloaded', () => {
-    sendStatus('Update ready to install.');
-    dialog.showMessageBox(win, {
-      type: 'info',
-      title: 'vTrack Update Ready',
-      message: 'A new version of vTrack has been downloaded.',
-      detail: 'Click "Restart Now" to apply the update, or "Later" to install it the next time vTrack opens.',
-      buttons: ['Restart Now', 'Later'],
-      defaultId: 0,
-      cancelId: 1,
-    }).then(({ response }) => {
-      if (response === 0) {
-        // isSilent=false: shows UAC if needed (perMachine install requires admin)
-        // isForceRunAfter=true: restarts the app after install
-        autoUpdater.quitAndInstall(false, true);
-      }
-    }).catch((e) => {
-      console.warn('[updater] dialog error (non-fatal):', e?.message || e);
-    });
+  autoUpdater.on('update-downloaded', (info) => {
+    log.info('[updater] Update downloaded:', info.version);
+    sendStatus(`v${info.version} ready! Restarting...`);
+    // Show the dialog immediately after download
+    if (win && !win.isDestroyed()) {
+      dialog.showMessageBox(win, {
+        type: 'info',
+        title: 'vTrack Update Ready',
+        message: `vTrack v${info.version} is ready to install!`,
+        detail: 'Click "Restart Now" to update, or "Later" to install on next launch.',
+        buttons: ['Restart Now', 'Later'],
+        defaultId: 0,
+        cancelId: 1,
+      }).then(({ response }) => {
+        if (response === 0) {
+          log.info('[updater] User approved restart');
+          autoUpdater.quitAndInstall(false, true);
+        } else {
+          log.info('[updater] User deferred update to next launch');
+          autoUpdater.autoInstallOnAppQuit = true;
+        }
+      }).catch((e) => {
+        log.error('[updater] dialog error:', e);
+      });
+    }
   });
 
   autoUpdater.on('error', (err) => {
-    const errorMsg = err == null ? "unknown" : (err.stack || err).toString();
-    sendStatus(`Update error: ${errorMsg.substring(0, 50)}...`);
-    console.error('[updater] Error:', err);
+    log.error('[updater] Error:', err);
+    const short = err == null ? 'unknown error' : err.message || err.toString();
+    sendStatus(`Update error: ${short.substring(0, 60)}`);
+    setTimeout(() => sendStatus(''), 8000);
   });
 
-  // Check 8 seconds after startup so it doesn't slow down the initial load
-  setTimeout(() => {
-    autoUpdater.checkForUpdates().catch((e) => {
-      const errorMsg = e == null ? "unknown" : (e.stack || e).toString();
-      sendStatus(`Check error: ${errorMsg.substring(0, 50)}...`);
-      console.error('[updater] checkForUpdates failed:', e);
-    });
-  }, 8000);
+  // Wait for the window to fully load before checking
+  // This prevents IPC race conditions on startup
+  win.webContents.once('did-finish-load', () => {
+    log.info('[updater] Window loaded. Checking for updates in 5 seconds...');
+    setTimeout(() => {
+      log.info('[updater] Running checkForUpdates now...');
+      autoUpdater.checkForUpdates().catch((e) => {
+        log.error('[updater] checkForUpdates failed:', e);
+        sendStatus(`Check failed: ${e?.message?.substring(0, 50) || 'unknown'}`);
+        setTimeout(() => sendStatus(''), 8000);
+      });
+    }, 5000);
+  });
+
+  // Also expose manual trigger via IPC
+  ipcMain.handle('check-for-updates', async () => {
+    log.info('[updater] Manual update check triggered');
+    try {
+      const result = await autoUpdater.checkForUpdates();
+      return { success: true, version: result?.updateInfo?.version };
+    } catch (e) {
+      log.error('[updater] Manual check error:', e);
+      return { success: false, error: e?.message };
+    }
+  });
 }
 
 function createWindow() {

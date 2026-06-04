@@ -45,11 +45,13 @@ export interface ElectronAPI {
   getQueueStats: () => Promise<{pendingCount: number, failedCount: number}>;
   forceSyncRetry: () => Promise<number>;
   onPowerStateChange: (callback: (state: 'suspend' | 'resume') => void) => () => void;
+  getAppVersion: () => Promise<string>;
+  checkForUpdates: () => Promise<{ success: boolean; version?: string; error?: string }>;
   onUpdaterStatus: (callback: (text: string) => void) => () => void;
 }
 
 declare global {
   interface Window {
-    electronAPI: ElectronAPI;
+    electronAPI?: ElectronAPI;
   }
 }
