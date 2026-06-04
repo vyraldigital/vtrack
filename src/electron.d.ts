@@ -45,6 +45,7 @@ export interface ElectronAPI {
   getQueueStats: () => Promise<{pendingCount: number, failedCount: number}>;
   forceSyncRetry: () => Promise<number>;
   onPowerStateChange: (callback: (state: 'suspend' | 'resume') => void) => () => void;
+  onUpdaterStatus: (callback: (text: string) => void) => () => void;
 }
 
 declare global {
