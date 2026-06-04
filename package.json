@@ -60,7 +60,8 @@
       "provider": "github",
       "owner": "vyraldigital",
       "repo": "vtrack",
-      "private": false
+      "private": false,
+      "releaseType": "release"
     },
     "asar": true,
     "asarUnpack": [
