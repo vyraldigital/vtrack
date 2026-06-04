@@ -32,6 +32,9 @@ jobs:
         run: npm version 1.0.${{ github.run_number }} --no-git-tag-version --allow-same-version
 
       - name: Build and Package (Windows)
+        env:
+          VITE_SUPABASE_URL: "https://aclftdltfpfsehdkxcwo.supabase.co"
+          VITE_SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFjbGZ0ZGx0ZnBmc2VoZGt4Y3dvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3NTE3NDMsImV4cCI6MjA5NDMyNzc0M30.o607u9kjIsKmArhcGq7t_PTlPdxAIDUIJ-BAcONhHFc"
         run: npm run build && npm run package -- --win --x64 --publish never
 
       # Publish a GitHub Release with:
