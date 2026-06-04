@@ -23,5 +23,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const listener = (event, state) => callback(state);
     ipcRenderer.on('power-state-change', listener);
     return () => ipcRenderer.removeListener('power-state-change', listener);
+  },
+  onUpdaterStatus: (callback) => {
+    const listener = (event, text) => callback(text);
+    ipcRenderer.on('updater-status', listener);
+    return () => ipcRenderer.removeListener('updater-status', listener);
   }
 });

@@ -120,7 +120,31 @@ function setupAutoUpdater(win) {
   // Never install pre-release builds on stable installs
   autoUpdater.allowPrerelease = false;
 
+  const sendStatus = (text) => {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('updater-status', text);
+    }
+  };
+
+  autoUpdater.on('checking-for-update', () => {
+    sendStatus('Checking for updates...');
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    sendStatus(`Update v${info.version} available. Downloading...`);
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    sendStatus('vTrack is up to date.');
+  });
+
+  autoUpdater.on('download-progress', (progressObj) => {
+    let percent = Math.round(progressObj.percent);
+    sendStatus(`Downloading update: ${percent}%`);
+  });
+
   autoUpdater.on('update-downloaded', () => {
+    sendStatus('Update ready to install.');
     dialog.showMessageBox(win, {
       type: 'info',
       title: 'vTrack Update Ready',
@@ -142,12 +166,14 @@ function setupAutoUpdater(win) {
 
   autoUpdater.on('error', (err) => {
     // Non-fatal — a network error or GitHub outage should never crash the app
+    sendStatus('Update error.');
     console.warn('[updater] auto-update error (non-fatal):', err?.message || err);
   });
 
   // Check 8 seconds after startup so it doesn't slow down the initial load
   setTimeout(() => {
     autoUpdater.checkForUpdates().catch((e) => {
+      sendStatus('Update check failed.');
       console.warn('[updater] checkForUpdates failed (non-fatal):', e?.message || e);
     });
   }, 8000);

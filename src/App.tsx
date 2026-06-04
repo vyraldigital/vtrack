@@ -73,6 +73,29 @@ export default function App() {
   const [activityStatus, setActivityStatus] = useState<'Active' | 'Idle' | 'Disabled'>('Disabled')
   const [activePercentage, setActivePercentage] = useState<number>(0)
   
+  const [updaterStatus, setUpdaterStatus] = useState<string | null>(null)
+
+  // Add cleanup for electron event listeners
+  useEffect(() => {
+    if (window.electronAPI?.onPowerStateChange) {
+      return window.electronAPI.onPowerStateChange((state: string) => {
+        if (state === 'suspend') {
+          console.log('System suspended')
+        } else if (state === 'resume') {
+          console.log('System resumed')
+        }
+      })
+    }
+  }, [])
+
+  useEffect(() => {
+    if (window.electronAPI?.onUpdaterStatus) {
+      return window.electronAPI.onUpdaterStatus((text: string) => {
+        setUpdaterStatus(text)
+      })
+    }
+  }, [])
+
   // Phase 4D State
   const [isOnline, setIsOnline] = useState(navigator.onLine)
   const [queueStats, setQueueStats] = useState({ pendingCount: 0, failedCount: 0 })
@@ -1389,7 +1412,10 @@ export default function App() {
               )
             )}
           </div>
-          <div>vTrack v0.5.1A</div>
+          <div className="flex items-center gap-3">
+            {updaterStatus && <span className="text-blue-400 font-medium animate-pulse">{updaterStatus}</span>}
+            <span>vTrack v0.5.1A</span>
+          </div>
         </div>
       </div>
     </div>
