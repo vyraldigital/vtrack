@@ -1,7 +1,7 @@
 {
   "name": "vtrack",
   "private": true,
-  "version": "0.5.0-A",
+  "version": "1.0.0",
   "type": "module",
   "main": "main.cjs",
   "scripts": {
@@ -36,7 +36,9 @@
       "icon": "build/icon.ico",
       "signtoolOptions": {
         "publisherName": "Vyral Digital",
-        "signingHashAlgorithms": ["sha256"],
+        "signingHashAlgorithms": [
+          "sha256"
+        ],
         "rfc3161TimeStampServer": "http://timestamp.digicert.com"
       }
     },
@@ -54,6 +56,12 @@
       "installerHeaderIcon": "build/icon.ico",
       "artifactName": "${productName}-Setup-${version}.${ext}"
     },
+    "publish": {
+      "provider": "github",
+      "owner": "vyraldigital",
+      "repo": "vtrack",
+      "private": false
+    },
     "asar": true,
     "asarUnpack": [
       "**/node_modules/uiohook-napi/**",
@@ -64,6 +72,7 @@
     "@seald-io/nedb": "^4.1.2",
     "@supabase/supabase-js": "^2.106.0",
     "@tailwindcss/vite": "^4.3.0",
+    "electron-updater": "^6.8.3",
     "get-windows": "^9.3.0",
     "lucide-react": "^1.16.0",
     "react": "^19.2.6",

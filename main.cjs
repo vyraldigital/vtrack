@@ -1,4 +1,5 @@
-const { app, BrowserWindow, ipcMain, systemPreferences, powerMonitor, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, systemPreferences, powerMonitor, shell, dialog } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
@@ -101,6 +102,57 @@ function getPermissions() {
   return permissions;
 }
 
+// ─── Auto-updater ─────────────────────────────────────────────────────────────
+// Security model:
+//   • Only runs in production builds (app.isPackaged) — never in dev
+//   • Downloads silently over HTTPS from GitHub Releases
+//   • electron-updater verifies the SHA512 hash before applying — MITM-proof
+//   • Never force-installs: editor must click "Restart Now" to apply
+//   • All errors are non-fatal — a broken update check never blocks the app
+// ──────────────────────────────────────────────────────────────────────────────
+function setupAutoUpdater(win) {
+  if (!app.isPackaged) return; // skip entirely in dev mode
+
+  // Do not auto-install on quit — only install when the user explicitly approves
+  autoUpdater.autoInstallOnAppQuit = false;
+  // Download in background; the hash is verified before the file is used
+  autoUpdater.autoDownload = true;
+  // Never install pre-release builds on stable installs
+  autoUpdater.allowPrerelease = false;
+
+  autoUpdater.on('update-downloaded', () => {
+    dialog.showMessageBox(win, {
+      type: 'info',
+      title: 'vTrack Update Ready',
+      message: 'A new version of vTrack has been downloaded.',
+      detail: 'Click "Restart Now" to apply the update, or "Later" to install it the next time vTrack opens.',
+      buttons: ['Restart Now', 'Later'],
+      defaultId: 0,
+      cancelId: 1,
+    }).then(({ response }) => {
+      if (response === 0) {
+        // isSilent=false: shows UAC if needed (perMachine install requires admin)
+        // isForceRunAfter=true: restarts the app after install
+        autoUpdater.quitAndInstall(false, true);
+      }
+    }).catch((e) => {
+      console.warn('[updater] dialog error (non-fatal):', e?.message || e);
+    });
+  });
+
+  autoUpdater.on('error', (err) => {
+    // Non-fatal — a network error or GitHub outage should never crash the app
+    console.warn('[updater] auto-update error (non-fatal):', err?.message || err);
+  });
+
+  // Check 8 seconds after startup so it doesn't slow down the initial load
+  setTimeout(() => {
+    autoUpdater.checkForUpdates().catch((e) => {
+      console.warn('[updater] checkForUpdates failed (non-fatal):', e?.message || e);
+    });
+  }, 8000);
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 440,
@@ -178,6 +230,7 @@ if (!gotTheLock) {
   queueDb.ensureIndex({ fieldName: 'created_at' });
 
   createWindow();
+  setupAutoUpdater(mainWindow);
 
   // Power monitor listeners (sleep/wake detection)
   powerMonitor.on('suspend', () => {
