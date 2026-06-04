@@ -34,6 +34,7 @@
       "target": "nsis",
       "requestedExecutionLevel": "asInvoker",
       "icon": "build/icon.ico",
+      "verifyUpdateCodeSignature": false,
       "signtoolOptions": {
         "publisherName": "Vyral Digital",
         "signingHashAlgorithms": [

@@ -165,16 +165,17 @@ function setupAutoUpdater(win) {
   });
 
   autoUpdater.on('error', (err) => {
-    // Non-fatal — a network error or GitHub outage should never crash the app
-    sendStatus('Update error.');
-    console.warn('[updater] auto-update error (non-fatal):', err?.message || err);
+    const errorMsg = err == null ? "unknown" : (err.stack || err).toString();
+    sendStatus(`Update error: ${errorMsg.substring(0, 50)}...`);
+    console.error('[updater] Error:', err);
   });
 
   // Check 8 seconds after startup so it doesn't slow down the initial load
   setTimeout(() => {
     autoUpdater.checkForUpdates().catch((e) => {
-      sendStatus('Update check failed.');
-      console.warn('[updater] checkForUpdates failed (non-fatal):', e?.message || e);
+      const errorMsg = e == null ? "unknown" : (e.stack || e).toString();
+      sendStatus(`Check error: ${errorMsg.substring(0, 50)}...`);
+      console.error('[updater] checkForUpdates failed:', e);
     });
   }, 8000);
 }
