@@ -110,6 +110,11 @@ export default function App() {
   const screenshotTimeoutRef = useRef<any | null>(null)
   const activityTrackerIntervalRef = useRef<any | null>(null)
   const idleMinutesRef = useRef<number>(0)
+  // True once the current idle stretch has been flagged on the active task timer,
+  // so we flag a long idle gap only once (reset when activity resumes).
+  const timerIdleFlaggedRef = useRef<boolean>(false)
+  // Minutes of continuous no-input before a running task timer is flagged for review.
+  const TIMER_IDLE_FLAG_MINUTES = 30
   
   const activeSessionRef = useRef<any>(null)
   const sessionRef = useRef<any>(null)
@@ -241,8 +246,32 @@ export default function App() {
                 total_minutes: item.payload_json.total_minutes,
                 sync_status: 'offline_synced'
               }).eq('id', item.payload_json.session_id)
-              
+
               if (updateError) throw updateError
+              success = true
+            } else if (item.type === 'timer_heartbeat') {
+              // Keep the active task timer alive (offline-buffered heartbeat)
+              const { error } = await supabase.rpc('desktop_timer_heartbeat', {
+                p_session_id: item.payload_json.session_id,
+                p_at: item.payload_json.at
+              })
+              if (error) throw error
+              success = true
+            } else if (item.type === 'timer_stop') {
+              // Stop the task timer at clock-out (offline-buffered)
+              const { error } = await supabase.rpc('desktop_timer_stop', {
+                p_session_id: item.payload_json.session_id,
+                p_end_time: item.payload_json.end_time
+              })
+              if (error) throw error
+              success = true
+            } else if (item.type === 'timer_flag') {
+              // Flag a long idle gap on the task timer for admin review
+              const { error } = await supabase.rpc('desktop_timer_flag', {
+                p_session_id: item.payload_json.session_id,
+                p_reason: item.payload_json.reason
+              })
+              if (error) throw error
               success = true
             }
           } catch (e: any) {
@@ -480,18 +509,40 @@ export default function App() {
 
         await window.electronAPI.enqueueSyncItem({
           type: 'clock_out',
-          payload_json: { 
-            session_id: activeSession.id, 
-            clock_out: now.toISOString(), 
-            total_minutes: totalMins 
+          payload_json: {
+            session_id: activeSession.id,
+            clock_out: now.toISOString(),
+            total_minutes: totalMins
           },
           idempotency_key: crypto.randomUUID()
         })
-        
+
+        // Auto-stop any running task timer at clock-out (offline-buffered)
+        const tsIdOffline = activeTimeSessionIdRef.current
+        if (tsIdOffline) {
+          await window.electronAPI.enqueueSyncItem({
+            type: 'timer_stop',
+            payload_json: { session_id: tsIdOffline, end_time: now.toISOString() },
+            idempotency_key: crypto.randomUUID()
+          })
+          activeTimeSessionIdRef.current = null
+        }
+
         setActiveSession(null)
         setRecoverySession(null)
         await fetchTodaySessions()
         return
+      }
+
+      // Auto-stop any running task timer at clock-out (wall-clock end)
+      const tsIdOnline = activeTimeSessionIdRef.current
+      if (tsIdOnline) {
+        try {
+          await supabase.rpc('desktop_timer_stop', { p_session_id: tsIdOnline, p_end_time: new Date().toISOString() })
+        } catch (e) {
+          console.error('Timer stop on clock-out failed:', e)
+        }
+        activeTimeSessionIdRef.current = null
       }
 
       // Call secure database RPC for clock out
@@ -597,6 +648,7 @@ export default function App() {
           .maybeSingle()
 
         if (error && error.code !== 'PGRST116') throw error
+        const prevTsId = activeTimeSessionIdRef.current
         if (data && data.task) {
           setActiveWebTask((data.task as unknown as { title: string }).title)
           activeWebTaskRef.current = (data.task as unknown as { title: string }).title
@@ -607,6 +659,10 @@ export default function App() {
           activeWebTaskRef.current = 'No active web task'
           activeWebTaskIdRef.current = null
           activeTimeSessionIdRef.current = null
+        }
+        // New/changed task session → allow the next idle gap to be flagged afresh
+        if (activeTimeSessionIdRef.current !== prevTsId) {
+          timerIdleFlaggedRef.current = false
         }
       } catch (err) {
         console.error('Error fetching web task:', err)
@@ -622,6 +678,28 @@ export default function App() {
 
     const triggerHeartbeat = async () => {
       if (!activeSession || !deviceInfo) return
+
+      // Keep the active web task timer alive from the DESKTOP, independent of the
+      // editor's browser. This is the core of Phase 2: a closed tab or dropped
+      // connection can no longer stop the task timer or lose time.
+      const tsId = activeTimeSessionIdRef.current
+      if (tsId) {
+        const nowIso = new Date().toISOString()
+        try {
+          if (!navigator.onLine && window.electronAPI) {
+            await window.electronAPI.enqueueSyncItem({
+              type: 'timer_heartbeat',
+              payload_json: { session_id: tsId, at: nowIso },
+              idempotency_key: crypto.randomUUID()
+            })
+          } else {
+            await supabase.rpc('desktop_timer_heartbeat', { p_session_id: tsId, p_at: nowIso })
+          }
+        } catch (e) {
+          console.error('Timer heartbeat failed:', e)
+        }
+      }
+
       try {
         const currentPermissions = await refreshPermissions()
 
@@ -850,8 +928,29 @@ export default function App() {
           if (idleMinutesRef.current >= 5) {
             setActivityStatus('Idle')
           }
+          // Flag a long idle gap on the active task timer ONCE per idle stretch
+          // (never deducts time — admin reviews). Offline-buffered.
+          const tsId = activeTimeSessionIdRef.current
+          if (tsId && idleMinutesRef.current >= TIMER_IDLE_FLAG_MINUTES && !timerIdleFlaggedRef.current) {
+            timerIdleFlaggedRef.current = true
+            const reason = `Idle ${idleMinutesRef.current}m during active timer — verify work time`
+            try {
+              if (!navigator.onLine && window.electronAPI) {
+                await window.electronAPI.enqueueSyncItem({
+                  type: 'timer_flag',
+                  payload_json: { session_id: tsId, reason },
+                  idempotency_key: crypto.randomUUID()
+                })
+              } else {
+                await supabase.rpc('desktop_timer_flag', { p_session_id: tsId, p_reason: reason })
+              }
+            } catch (e) {
+              console.error('Timer idle flag failed:', e)
+            }
+          }
         } else {
           idleMinutesRef.current = 0
+          timerIdleFlaggedRef.current = false // activity resumed — allow flagging the next gap
           setActivityStatus('Active')
         }
 
