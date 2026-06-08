@@ -74,6 +74,8 @@ export default function App() {
   const [showSessionHistory, setShowSessionHistory] = useState(false)
   const [activityStatus, setActivityStatus] = useState<'Active' | 'Idle' | 'Disabled'>('Disabled')
   const [activePercentage, setActivePercentage] = useState<number>(0)
+  // Shown right after clock-in when there's no in-progress task to resume.
+  const [clockInNudge, setClockInNudge] = useState<string | null>(null)
 
   useEffect(() => {
     if (window.electronAPI?.onPowerStateChange) {
@@ -481,6 +483,26 @@ export default function App() {
       setRecoverySession(null)
       // Refresh today's sessions to include the new active session
       await fetchTodaySessions()
+
+      // Smart resume: if the editor already has a task in progress, resume its
+      // timer automatically. Otherwise show a gentle nudge to start one.
+      setClockInNudge(null)
+      try {
+        const { data: resume } = await supabase.rpc('desktop_timer_resume')
+        if (resume?.resumed && resume.id) {
+          activeTimeSessionIdRef.current = resume.id
+          if (resume.title) {
+            setActiveWebTask(resume.title)
+            activeWebTaskRef.current = resume.title
+          }
+          if (resume.task_id) activeWebTaskIdRef.current = resume.task_id
+          timerIdleFlaggedRef.current = false
+        } else if (resume && !resume.already_active) {
+          setClockInNudge('Clocked in — open vOps and start a task to track your time.')
+        }
+      } catch (e) {
+        console.error('Resume-on-clock-in check failed:', e)
+      }
     } catch (err: any) {
       console.error(err)
       let errorMsg = err.message || 'Failed to Clock In.'
@@ -654,6 +676,7 @@ export default function App() {
           activeWebTaskRef.current = (data.task as unknown as { title: string }).title
           activeWebTaskIdRef.current = data.task_id
           activeTimeSessionIdRef.current = data.id
+          setClockInNudge(null) // a task is now being tracked — clear the reminder
         } else {
           setActiveWebTask('No active web task')
           activeWebTaskRef.current = 'No active web task'
@@ -1367,6 +1390,14 @@ export default function App() {
             <p className="text-[11px] text-slate-500 font-light">No sessions logged today yet.</p>
           )}
         </div>
+
+        {/* Gentle reminder: clocked in but no task being tracked */}
+        {isClockedIn && clockInNudge && (
+          <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 text-amber-800 rounded-2xl px-3.5 py-2.5">
+            <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+            <p className="text-[11px] font-medium leading-snug">{clockInNudge}</p>
+          </div>
+        )}
 
         {/* Secondary Metrics Grid */}
         <div className="grid grid-cols-2 gap-3">
