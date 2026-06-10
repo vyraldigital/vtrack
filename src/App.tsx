@@ -117,6 +117,11 @@ export default function App() {
   const timerIdleFlaggedRef = useRef<boolean>(false)
   // Minutes of continuous no-input before a running task timer is flagged for review.
   const TIMER_IDLE_FLAG_MINUTES = 30
+  // Minutes of real activity with NO task timer running before we auto-resume the
+  // editor's in-progress task (or nudge them to start one). Catches "paused the
+  // timer by accident and kept working" — untracked work should never accumulate.
+  const UNTRACKED_WORK_MINUTES = 10
+  const untrackedActiveMinRef = useRef<number>(0)
   
   const activeSessionRef = useRef<any>(null)
   const sessionRef = useRef<any>(null)
@@ -975,6 +980,45 @@ export default function App() {
           idleMinutesRef.current = 0
           timerIdleFlaggedRef.current = false // activity resumed — allow flagging the next gap
           setActivityStatus('Active')
+
+          // Untracked-work watchdog: real input but NO task timer running.
+          if (!activeTimeSessionIdRef.current) {
+            untrackedActiveMinRef.current += 1
+            if (untrackedActiveMinRef.current >= UNTRACKED_WORK_MINUTES) {
+              if (navigator.onLine) {
+                try {
+                  const { data: resume } = await supabase.rpc('desktop_timer_resume')
+                  if (resume?.resumed && resume.id) {
+                    // Same safe rule as clock-in: only an already-In-Progress task resumes.
+                    activeTimeSessionIdRef.current = resume.id
+                    if (resume.task_id) activeWebTaskIdRef.current = resume.task_id
+                    if (resume.title) {
+                      setActiveWebTask(resume.title)
+                      activeWebTaskRef.current = resume.title
+                    }
+                    timerIdleFlaggedRef.current = false
+                    untrackedActiveMinRef.current = 0
+                    setClockInNudge(`Timer auto-resumed on "${resume.title || 'your task'}" — you were working untracked.`)
+                  } else if (resume?.already_active) {
+                    untrackedActiveMinRef.current = 0
+                  } else {
+                    // No in-progress task to resume — keep nudging, retry in 5 min.
+                    setClockInNudge('You appear to be working with no task timer — start your task in vOps so this time is tracked.')
+                    untrackedActiveMinRef.current = UNTRACKED_WORK_MINUTES - 5
+                  }
+                } catch (e) {
+                  console.error('Untracked-work auto-resume failed:', e)
+                  untrackedActiveMinRef.current = UNTRACKED_WORK_MINUTES - 5
+                }
+              } else {
+                // Offline: can't safely resume — nudge and retry once back online.
+                setClockInNudge('You appear to be working with no task timer — start your task in vOps so this time is tracked.')
+                untrackedActiveMinRef.current = UNTRACKED_WORK_MINUTES - 5
+              }
+            }
+          } else {
+            untrackedActiveMinRef.current = 0
+          }
         }
 
         const now = new Date()
