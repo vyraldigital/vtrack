@@ -987,7 +987,11 @@ export default function App() {
             if (untrackedActiveMinRef.current >= UNTRACKED_WORK_MINUTES) {
               if (navigator.onLine) {
                 try {
-                  const { data: resume } = await supabase.rpc('desktop_timer_resume')
+                  // Pass the streak length so the session is BACKFILLED to when the
+                  // untracked work began (capped server-side) — no minutes lost.
+                  const { data: resume } = await supabase.rpc('desktop_timer_resume', {
+                    p_untracked_minutes: untrackedActiveMinRef.current,
+                  })
                   if (resume?.resumed && resume.id) {
                     // Same safe rule as clock-in: only an already-In-Progress task resumes.
                     activeTimeSessionIdRef.current = resume.id
@@ -998,7 +1002,7 @@ export default function App() {
                     }
                     timerIdleFlaggedRef.current = false
                     untrackedActiveMinRef.current = 0
-                    setClockInNudge(`Timer auto-resumed on "${resume.title || 'your task'}" — you were working untracked.`)
+                    setClockInNudge(`Timer auto-resumed on "${resume.title || 'your task'}" — your untracked minutes were credited.`)
                   } else if (resume?.already_active) {
                     untrackedActiveMinRef.current = 0
                   } else {
