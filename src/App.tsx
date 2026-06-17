@@ -122,7 +122,11 @@ export default function App() {
   // timer by accident and kept working" — untracked work should never accumulate.
   const UNTRACKED_WORK_MINUTES = 10
   const untrackedActiveMinRef = useRef<number>(0)
-  
+  // Minutes of continuous no-input before we AUTO CLOCK OUT (capped at last
+  // activity) — long enough to ignore normal breaks (lunch etc.).
+  const ATTENDANCE_IDLE_CLOCKOUT_MINUTES = 60
+  const idleClockedOutRef = useRef<boolean>(false)
+
   const activeSessionRef = useRef<any>(null)
   const sessionRef = useRef<any>(null)
   const profileRef = useRef<any>(null)
@@ -486,6 +490,11 @@ export default function App() {
 
       setActiveSession(sess)
       setRecoverySession(null)
+      // Fresh session — re-arm the idle auto-clock-out guard, ask for notification
+      // permission (so the auto clock-out can surface a native popup).
+      idleClockedOutRef.current = false
+      idleMinutesRef.current = 0
+      try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission() } catch {}
       // Refresh today's sessions to include the new active session
       await fetchTodaySessions()
 
@@ -976,9 +985,40 @@ export default function App() {
               console.error('Timer idle flag failed:', e)
             }
           }
+
+          // Auto clock-out after 1h of no input — capped at when activity stopped,
+          // so a forgotten clock-out can never inflate attendance. Fires once.
+          if (idleMinutesRef.current >= ATTENDANCE_IDLE_CLOCKOUT_MINUTES && !idleClockedOutRef.current && navigator.onLine) {
+            idleClockedOutRef.current = true
+            try {
+              // Stop any running task timer first (consistent with manual clock-out).
+              if (tsId) {
+                try { await supabase.rpc('desktop_timer_stop', { p_session_id: tsId, p_end_time: new Date(Date.now() - idleMinutesRef.current * 60000).toISOString() }) } catch {}
+                activeTimeSessionIdRef.current = null
+              }
+              const { data: res } = await supabase.rpc('desktop_idle_clock_out', {
+                p_session_id: currActiveSession.id,
+                p_idle_minutes: idleMinutesRef.current,
+              })
+              if (res?.ok) {
+                const at = new Date(res.clock_out).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+                setActiveSession(null)
+                stopAllTrackers()
+                await fetchTodaySessions()
+                const msg = `You were auto clocked out at ${at} after 1 hour of inactivity. Clock back in when you resume.`
+                setSyncError('')
+                try { if ('Notification' in window && Notification.permission === 'granted') new Notification('vTrack — Auto clocked out', { body: msg }) } catch {}
+                alert(msg)
+              }
+            } catch (e) {
+              console.error('Idle auto clock-out failed:', e)
+              idleClockedOutRef.current = false // allow retry next minute
+            }
+          }
         } else {
           idleMinutesRef.current = 0
           timerIdleFlaggedRef.current = false // activity resumed — allow flagging the next gap
+          idleClockedOutRef.current = false
           setActivityStatus('Active')
 
           // Untracked-work watchdog: real input but NO task timer running.
