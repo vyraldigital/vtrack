@@ -333,13 +333,17 @@ export default function App() {
     try {
       const { data, error } = await supabase
         .from('profiles')
-        .select('name, email, role, activity_tracking_enabled')
+        .select('name, email, role, roles, activity_tracking_enabled')
         .eq('id', userId)
         .single()
 
       if (error) throw error
 
-      if (!['editor', 'manager'].includes(data.role)) {
+      // Tracker is for work-doers: editors + every manager variant. Multi-role
+      // aware (roles[] with a fallback to the legacy single role).
+      const allowed = ['editor', 'manager', 'team_manager', 'project_manager']
+      const userRoles: string[] = data.roles?.length ? data.roles : (data.role ? [data.role] : [])
+      if (!userRoles.some((r) => allowed.includes(r))) {
         setAuthError('Access denied. Only editors and managers are authorized to use the desktop tracker.')
         await supabase.auth.signOut()
         return
