@@ -335,9 +335,21 @@ export default function App() {
         .from('profiles')
         .select('name, email, role, roles, activity_tracking_enabled')
         .eq('id', userId)
-        .single()
+        .maybeSingle()
 
       if (error) throw error
+
+      // No row despite no error means the session token isn't authenticating —
+      // e.g. it expired, or a token refresh got rate-limited, so the request hit
+      // RLS as an anonymous user and the `TO authenticated` profiles policy
+      // returned nothing. Recover with a clean re-login instead of surfacing the
+      // cryptic "Cannot coerce the result to a single JSON object" this used to
+      // throw when `.single()` got zero rows.
+      if (!data) {
+        setAuthError('Your session expired. Please sign in again.')
+        await supabase.auth.signOut()
+        return
+      }
 
       // Tracker is for work-doers: editors + every manager variant. Multi-role
       // aware (roles[] with a fallback to the legacy single role).
@@ -357,8 +369,11 @@ export default function App() {
     } catch (err: any) {
       console.error(err)
       let errorMsg = err.message || 'Failed to load profile details.'
-      if (err.message && (err.message.toLowerCase().includes('fetch') || err.message.toLowerCase().includes('network') || err.message.toLowerCase().includes('failed to connect'))) {
+      const m = (err.message || '').toLowerCase()
+      if (m.includes('fetch') || m.includes('network') || m.includes('failed to connect')) {
         errorMsg = 'Unable to connect to vOps server. Please check your internet connection.'
+      } else if (err.status === 429 || m.includes('rate limit')) {
+        errorMsg = 'Too many attempts right now. Please wait a minute and try again.'
       }
       setAuthError(errorMsg)
     } finally {
@@ -448,7 +463,14 @@ export default function App() {
       const { error } = await supabase.auth.signInWithPassword({ email, password })
       if (error) throw error
     } catch (err: any) {
-      setAuthError(err.message || 'Login failed. Please check credentials.')
+      const m = (err.message || '').toLowerCase()
+      let msg = err.message || 'Login failed. Please check credentials.'
+      // Friendly message on Supabase auth throttling — tells users to wait
+      // rather than mash the button, which is what exhausts the limit.
+      if (err.status === 429 || m.includes('rate limit')) {
+        msg = 'Too many sign-in attempts. Please wait a minute, then try again.'
+      }
+      setAuthError(msg)
       setLoading(false)
     }
   }
