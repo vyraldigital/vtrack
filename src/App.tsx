@@ -20,6 +20,8 @@ type Profile = {
   name: string
   email: string
   role: string
+  roles?: string[] | null
+  status?: string | null
   activity_tracking_enabled: boolean
 }
 
@@ -333,7 +335,7 @@ export default function App() {
     try {
       const { data, error } = await supabase
         .from('profiles')
-        .select('name, email, role, roles, activity_tracking_enabled')
+        .select('name, email, role, roles, status, activity_tracking_enabled')
         .eq('id', userId)
         .maybeSingle()
 
@@ -351,12 +353,13 @@ export default function App() {
         return
       }
 
-      // Tracker is for work-doers: editors + every manager variant. Multi-role
-      // aware (roles[] with a fallback to the legacy single role).
-      const allowed = ['editor', 'manager', 'team_manager', 'project_manager']
-      const userRoles: string[] = data.roles?.length ? data.roles : (data.role ? [data.role] : [])
-      if (!userRoles.some((r) => allowed.includes(r))) {
-        setAuthError('Access denied. Only editors and managers are authorized to use the desktop tracker.')
+      // Any vOps account may use the tracker — role no longer gates access (HR and
+      // Sales were previously refused). Only a DEACTIVATED account is turned away;
+      // the desktop_clock_in RPC enforces the same rule server-side. Checking for
+      // an explicit 'inactive' (not `!== 'active'`) means a null/absent status
+      // never locks anyone out.
+      if (data.status === 'inactive') {
+        setAuthError('This account has been deactivated. Please contact your admin.')
         await supabase.auth.signOut()
         return
       }
