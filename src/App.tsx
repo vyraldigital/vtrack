@@ -1,20 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { supabase } from './supabase'
-import { 
-  Fingerprint, 
-  LogOut, 
-  AlertTriangle, 
-  User, 
-  Clock, 
-  ShieldCheck, 
-  Play, 
-  Square,
-  RefreshCw,
-  Calendar,
-  ChevronDown,
-  ChevronUp,
-  History
-} from 'lucide-react'
+import { Fingerprint, LogOut, AlertTriangle, Clock, RefreshCw } from 'lucide-react'
 
 type Profile = {
   name: string
@@ -128,6 +114,25 @@ export default function App() {
   // activity) — long enough to ignore normal breaks (lunch etc.).
   const ATTENDANCE_IDLE_CLOCKOUT_MINUTES = 60
   const idleClockedOutRef = useRef<boolean>(false)
+
+  // ── Break mode ────────────────────────────────────────────────────────────
+  // A break is a declared interval; the task timer and attendance session keep
+  // running through it (breaks are paid work here), and the server excuses the
+  // interval from the 30-minute dead-gap trim. Two thresholds:
+  //   50m → friendly nudge (once)
+  //   60m → wrap up: if there was NO real input the person is genuinely away, so
+  //         we credit 30m and clock out; if they ARE active they simply forgot to
+  //         switch back, so we keep every minute and flag it for review.
+  const BREAK_NUDGE_MINUTES = 50
+  const BREAK_LIMIT_MINUTES = 60
+  const BREAK_CREDIT_MINUTES = 30
+  const [activeBreak, setActiveBreak] = useState<{ id: string; started_at: string } | null>(null)
+  const [breakStr, setBreakStr] = useState('0:00')
+  const [breakNudged, setBreakNudged] = useState(false)
+  const [breakBusy, setBreakBusy] = useState(false)
+  const [breaksToday, setBreaksToday] = useState<{ count: number; minutes: number }>({ count: 0, minutes: 0 })
+  const activeBreakRef = useRef<{ id: string; started_at: string } | null>(null)
+  const breakLimitHandledRef = useRef<boolean>(false)
 
   const activeSessionRef = useRef<any>(null)
   const sessionRef = useRef<any>(null)
@@ -560,8 +565,165 @@ export default function App() {
     }
   }
 
+  // ── Break mode handlers ───────────────────────────────────────────────────
+  const refreshBreaksToday = async (userId = session?.user?.id) => {
+    if (!userId) return
+    const since = new Date(); since.setHours(0, 0, 0, 0)
+    try {
+      const { data } = await supabase
+        .from('work_breaks')
+        .select('started_at, ended_at')
+        .eq('user_id', userId)
+        .gte('started_at', since.toISOString())
+      const rows = data ?? []
+      const minutes = rows.reduce((sum, b: any) => {
+        if (!b.ended_at) return sum
+        return sum + Math.max(0, Math.round((new Date(b.ended_at).getTime() - new Date(b.started_at).getTime()) / 60000))
+      }, 0)
+      setBreaksToday({ count: rows.length, minutes })
+    } catch { /* table may not exist yet — breaks are a bonus signal */ }
+  }
+
+  const startBreak = async () => {
+    if (!activeSession || activeBreakRef.current) return
+    setBreakBusy(true)
+    try {
+      const { data, error } = await supabase.rpc('desktop_break_start')
+      if (error) throw error
+      const brk = data as { id: string; started_at: string }
+      setActiveBreak(brk); activeBreakRef.current = brk
+      setBreakNudged(false); breakLimitHandledRef.current = false
+    } catch (e: any) {
+      setSyncError(e?.message || 'Could not start the break. Please try again.')
+    } finally { setBreakBusy(false) }
+  }
+
+  const endBreak = async (reason: 'manual' | 'auto_60m' | 'clock_out' = 'manual') => {
+    if (!activeBreakRef.current) return
+    setBreakBusy(true)
+    try {
+      await supabase.rpc('desktop_break_end', { p_reason: reason })
+    } catch (e) {
+      console.error('End break failed:', e)
+    } finally {
+      setActiveBreak(null); activeBreakRef.current = null
+      setBreakNudged(false); breakLimitHandledRef.current = false
+      setBreakBusy(false)
+      refreshBreaksToday()
+    }
+  }
+
+  // Fired once when a break reaches BREAK_LIMIT_MINUTES.
+  const handleBreakLimit = async () => {
+    const brk = activeBreakRef.current
+    const currSession = activeSessionRef.current
+    if (!brk) return
+
+    // Genuinely away = a full stretch of no keyboard/mouse input.
+    const away = idleMinutesRef.current >= BREAK_LIMIT_MINUTES
+
+    if (!away) {
+      // They're clearly working and just forgot to switch back — keep every
+      // minute, flag the session so a human can verify it against screenshots.
+      await endBreak('manual')
+      const tsId = activeTimeSessionIdRef.current
+      if (tsId && navigator.onLine) {
+        try {
+          await supabase.rpc('desktop_timer_flag', {
+            p_session_id: tsId,
+            p_reason: 'Break mode left on past 60m while active — verify against screenshots',
+          })
+        } catch { /* flagging is best-effort */ }
+      }
+      return
+    }
+
+    // Away: credit 30 minutes from the break start, then clock out at that moment.
+    const creditedEnd = new Date(brk.started_at).getTime() + BREAK_CREDIT_MINUTES * 60000
+    await endBreak('auto_60m')  // server writes ended_at = started_at + 30m
+    if (!currSession || !navigator.onLine) return
+    try {
+      const tsId = activeTimeSessionIdRef.current
+      if (tsId) {
+        try { await supabase.rpc('desktop_timer_stop', { p_session_id: tsId, p_end_time: new Date(creditedEnd).toISOString() }) } catch {}
+        activeTimeSessionIdRef.current = null
+      }
+      // Reuse the proven idle clock-out path; idle minutes are measured back from
+      // the credited moment so attendance closes at break_start + 30m.
+      const backdateMinutes = Math.max(0, Math.round((Date.now() - creditedEnd) / 60000))
+      const { data: res } = await supabase.rpc('desktop_idle_clock_out', {
+        p_session_id: currSession.id,
+        p_idle_minutes: backdateMinutes,
+      })
+      if (res?.ok) {
+        const at = new Date(res.clock_out).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+        setActiveSession(null)
+        stopAllTrackers()
+        await fetchTodaySessions()
+        const msg = `Your break ran past an hour, so we clocked you out at ${at} with 30 minutes counted. Clock back in whenever you're ready.`
+        try { if ('Notification' in window && Notification.permission === 'granted') new Notification('vTrack — Break wrapped up', { body: msg }) } catch {}
+        alert(msg)
+      }
+    } catch (e) {
+      console.error('Break auto clock-out failed:', e)
+    }
+  }
+
+  // Restore an open break after a relaunch/crash, and keep today's totals fresh.
+  useEffect(() => {
+    const uid = session?.user?.id
+    if (!uid) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const { data } = await supabase
+          .from('work_breaks')
+          .select('id, started_at')
+          .eq('user_id', uid)
+          .is('ended_at', null)
+          .order('started_at', { ascending: false })
+          .limit(1)
+        const open = data?.[0] as { id: string; started_at: string } | undefined
+        if (!cancelled && open && activeSessionRef.current) {
+          setActiveBreak(open); activeBreakRef.current = open
+        }
+      } catch { /* pre-migration — no breaks yet */ }
+      if (!cancelled) refreshBreaksToday(uid)
+    })()
+    return () => { cancelled = true }
+  }, [session?.user?.id, activeSession?.id])
+
+  // Break ticker: drives the on-screen timer, the 50m nudge and the 60m wrap-up.
+  useEffect(() => {
+    if (!activeBreak) { setBreakStr('0:00'); return }
+    const tick = async () => {
+      const ms = Date.now() - new Date(activeBreak.started_at).getTime()
+      const mins = Math.floor(ms / 60000)
+      setBreakStr(`${mins}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`)
+
+      if (mins >= BREAK_NUDGE_MINUTES && !breakNudged) {
+        setBreakNudged(true)
+        try { await supabase.rpc('desktop_break_nudge') } catch { /* best-effort */ }
+        try {
+          if ('Notification' in window && Notification.permission === 'granted') {
+            new Notification('vTrack', { body: "Still on break? No rush — just tap I'm back when you return." })
+          }
+        } catch { /* notifications are optional */ }
+      }
+
+      if (mins >= BREAK_LIMIT_MINUTES && !breakLimitHandledRef.current) {
+        breakLimitHandledRef.current = true
+        await handleBreakLimit()
+      }
+    }
+    tick()
+    const iv = setInterval(tick, 1000)
+    return () => clearInterval(iv)
+  }, [activeBreak, breakNudged])
+
   const handleClockOut = async () => {
     if (!activeSession) return
+    if (activeBreakRef.current) await endBreak('clock_out')
     setSyncing(true)
     setSyncError('')
 
@@ -997,7 +1159,8 @@ export default function App() {
           // Flag a long idle gap on the active task timer ONCE per idle stretch
           // (never deducts time — admin reviews). Offline-buffered.
           const tsId = activeTimeSessionIdRef.current
-          if (tsId && idleMinutesRef.current >= TIMER_IDLE_FLAG_MINUTES && !timerIdleFlaggedRef.current) {
+          // Not while on a declared break — that idleness is expected, not suspicious.
+          if (tsId && idleMinutesRef.current >= TIMER_IDLE_FLAG_MINUTES && !timerIdleFlaggedRef.current && !activeBreakRef.current) {
             timerIdleFlaggedRef.current = true
             const reason = `Idle ${idleMinutesRef.current}m during active timer — verify work time`
             try {
@@ -1017,7 +1180,9 @@ export default function App() {
 
           // Auto clock-out after 1h of no input — capped at when activity stopped,
           // so a forgotten clock-out can never inflate attendance. Fires once.
-          if (idleMinutesRef.current >= ATTENDANCE_IDLE_CLOCKOUT_MINUTES && !idleClockedOutRef.current && navigator.onLine) {
+          // Skipped while a break is declared — handleBreakLimit owns the wrap-up
+          // there (credit 30m, then clock out), so the two can't both fire.
+          if (idleMinutesRef.current >= ATTENDANCE_IDLE_CLOCKOUT_MINUTES && !idleClockedOutRef.current && navigator.onLine && !activeBreakRef.current) {
             idleClockedOutRef.current = true
             try {
               // Stop any running task timer first (consistent with manual clock-out).
@@ -1367,321 +1532,233 @@ export default function App() {
   // Permissions compact check
   const allPermissionsGranted = permissions.screen === 'granted' && permissions.accessibility === 'granted'
 
+  // ── Dial geometry ─────────────────────────────────────────────────────────
+  const DIAL_R = 99
+  const DIAL_C = 2 * Math.PI * DIAL_R
+  const onBreak = !!activeBreak
+  const elapsedMs = isClockedIn && activeSession ? Date.now() - new Date(activeSession.clock_in).getTime() : 0
+  const breakMs = activeBreak ? Date.now() - new Date(activeBreak.started_at).getTime() : 0
+  // On a break the ring counts toward the 60-minute wrap-up; otherwise it shows
+  // the shift filling up (8h reference).
+  const dialPct = onBreak
+    ? Math.min(1, breakMs / (BREAK_LIMIT_MINUTES * 60000))
+    : Math.min(1, elapsedMs / (8 * 3600000))
+  const dialLen = DIAL_C * dialPct
+  const dialColor = onBreak ? '#E8890C' : '#0A0A0A'
+  const ticks = <circle cx="119" cy="119" r={DIAL_R} fill="none" stroke="#fff" strokeWidth="15" strokeDasharray="2 6.171" />
+
+  const initial = (profile?.name || profile?.email || 'U').charAt(0).toUpperCase()
+  const totalTodayStr = formatTotalTime(completedMinutesToday + (isClockedIn && activeSession ? Math.floor(elapsedMs / 60000) : 0))
+
   return (
-    <div className="flex flex-col h-screen bg-slate-50 text-slate-900 justify-between select-none">
-      {/* Top Header */}
-      <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 bg-slate-50 shadow-sm shrink-0">
-        <div className="flex items-center gap-3">
-          <div className="h-8 w-8 rounded-lg bg-white border border-slate-200 p-[1px] shadow-sm shadow-blue-500/20 flex items-center justify-center">
-             <div className="h-full w-full bg-white rounded-lg flex items-center justify-center">
-               <Fingerprint className="h-5 w-5 text-blue-400" />
-             </div>
+    <div className="flex flex-col h-screen bg-white text-[#0A0A0A] select-none">
+      {/* ── Top bar ── */}
+      <div className="flex items-center justify-between px-5 py-4 shrink-0">
+        <div className="flex items-center gap-2.5">
+          <div className="h-[26px] w-[26px] rounded-lg bg-[#0A0A0A] flex items-center justify-center">
+            <Fingerprint className="h-3.5 w-3.5 text-white" />
           </div>
-          <div>
-            <h1 className="text-[14px] font-semibold text-slate-900 tracking-tight">vTrack</h1>
-            <p className="text-[10px] text-slate-500 font-light">Vyral Operations System</p>
-          </div>
+          <span className="text-[13px] font-semibold tracking-tight">vTrack</span>
         </div>
-        <button 
-          onClick={handleLogout} 
-          className="h-8 px-3 rounded-lg border border-slate-200 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 hover:border-rose-500/20 flex items-center gap-1.5 text-[11px] font-medium transition-all"
-        >
-          <LogOut className="h-3.5 w-3.5" /> Logout
-        </button>
+        <div className="flex items-center gap-2.5">
+          <div className="h-[27px] w-[27px] rounded-full bg-[#FAFAFA] border border-[#EAEAEA] flex items-center justify-center text-[11px] font-semibold text-[#525252]" title={profile?.email}>
+            {initial}
+          </div>
+          <button onClick={handleLogout} title="Log out" className="text-[#B4B4B4] hover:text-[#0A0A0A] transition-colors">
+            <LogOut className="h-4 w-4" />
+          </button>
+        </div>
       </div>
 
-      {/* Main Content Area */}
-      <div className="flex-1 overflow-y-auto px-5 py-5 space-y-5">
-        {/* Editor Profile Details */}
-        <div className="bg-white backdrop-blur-md p-3.5 rounded-2xl border border-slate-200 flex items-center gap-3 shadow-sm">
-          <div className="h-10 w-10 rounded-full bg-slate-800 border border-slate-200 text-slate-500 flex items-center justify-center shrink-0 shadow-inner">
-            <User className="h-4.5 w-4.5" />
-          </div>
-          <div className="min-w-0">
-            <p className="text-[13px] font-medium text-slate-900 truncate tracking-wide">{profile?.name}</p>
-            <p className="text-[11px] text-slate-500 truncate font-light">{profile?.email}</p>
-          </div>
+      {/* ── Body ── */}
+      <div className="flex-1 overflow-y-auto px-6 flex flex-col">
+        <div className="flex items-baseline justify-between pb-1">
+          <span className="text-[10px] font-semibold tracking-[.14em] uppercase text-[#B4B4B4]">Your day</span>
+          <span className="text-[11.5px] text-[#B4B4B4]">{todayDateStr}</span>
         </div>
 
-        {/* Sync errors block */}
-        {syncError && (
-          <div className="p-4 bg-rose-500/10 border border-rose-500/20 rounded-2xl text-[12px] text-rose-400 flex flex-col gap-2 backdrop-blur-md">
-            <div className="flex gap-2 items-start">
-              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
-              <span className="font-medium">{syncError}</span>
+        {/* Dial */}
+        <div className="relative w-[238px] h-[238px] mx-auto mt-3.5">
+          <svg width="238" height="238" viewBox="0 0 238 238" style={{ transform: 'rotate(-90deg)' }}>
+            <defs><mask id="dialTicks">{ticks}</mask></defs>
+            <circle cx="119" cy="119" r={DIAL_R} fill="none" stroke="#E4E4E4" strokeWidth="15" mask="url(#dialTicks)" />
+            {dialLen > 0 && (
+              <circle cx="119" cy="119" r={DIAL_R} fill="none" stroke={dialColor} strokeWidth="15" mask="url(#dialTicks)"
+                      strokeDasharray={`${dialLen.toFixed(1)} ${(DIAL_C - dialLen).toFixed(1)}`} />
+            )}
+          </svg>
+          <div className="absolute inset-0 flex flex-col items-center justify-center">
+            <div className={`text-[9.5px] font-semibold tracking-[.16em] uppercase mb-1.5 ${onBreak ? 'text-[#E8890C]' : 'text-[#B4B4B4]'}`}>
+              {onBreak ? (breakNudged ? 'Still on break?' : 'On a break') : isClockedIn ? 'Elapsed' : 'Not started'}
             </div>
-            {syncError.includes('Clock Out') && (
-              <button
-                onClick={handleClockOut}
-                disabled={syncing}
-                className="self-start text-[11px] text-rose-300 font-semibold hover:text-rose-200 transition-colors"
-              >
-                Retry Clock Out
-              </button>
-            )}
-            {syncError.includes('Clock In') && (
-              <button
-                onClick={handleClockIn}
-                disabled={syncing}
-                className="self-start text-[11px] text-rose-300 font-semibold hover:text-rose-200 transition-colors"
-              >
-                Retry Clock In
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* Today's Date */}
-        <div className="flex items-center gap-2 px-1">
-          <Calendar className="h-4 w-4 text-slate-500" />
-          <p className="text-[12px] font-medium tracking-wide text-slate-500">{todayDateStr}</p>
-        </div>
-
-        {/* Large Timer Visualizer */}
-        <div className="bg-white backdrop-blur-xl p-6 rounded-3xl border border-slate-200 text-center space-y-2 relative overflow-hidden shadow-sm">
-          {isClockedIn && <div className="absolute -top-24 -left-24 w-48 h-48 bg-blue-500/20 rounded-full blur-3xl animate-pulse-slow"></div>}
-          {isClockedIn && <div className="absolute -bottom-24 -right-24 w-48 h-48 bg-emerald-500/10 rounded-full blur-3xl animate-pulse-slow" style={{ animationDelay: '1s' }}></div>}
-          
-          <p className="text-[11px] font-medium uppercase tracking-widest text-slate-500 relative z-10">
-            {isClockedIn ? 'Clocked In Duration' : 'Not Clocked In'}
-          </p>
-          <h2 className={`text-[40px] font-light font-mono tracking-tighter relative z-10 ${isClockedIn ? 'text-slate-900 drop-shadow-[0_0_15px_rgba(255,255,255,0.3)]' : 'text-slate-600'}`}>
-            {timerStr}
-          </h2>
-          <div className="flex justify-center pt-2 relative z-10">
-            {isClockedIn ? (
-              <span className="flex items-center gap-1.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider backdrop-blur-md shadow-[0_0_10px_rgba(16,185,129,0.2)]">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" /> Live Tracking
-              </span>
-            ) : (
-              <span className="flex items-center gap-1.5 bg-white border border-slate-200 text-slate-500 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider">
-                Offline
-              </span>
-            )}
+            <div className={`text-[46px] font-[250] tracking-[-.035em] tabular-nums leading-none ${isClockedIn ? 'text-[#0A0A0A]' : 'text-[#B4B4B4]'}`}>
+              {onBreak ? breakStr : timerStr}
+            </div>
+            <div className="text-[11.5px] text-[#8A8A8A] tabular-nums mt-2.5">
+              {onBreak
+                ? `Task time still running · ${timerStr}`
+                : isClockedIn ? `${totalTodayStr} today` : `${totalTodayStr} logged today`}
+            </div>
           </div>
         </div>
 
-        {/* Today's Total Time Card */}
-        <div className="bg-white backdrop-blur-md p-4 rounded-2xl border border-slate-200 space-y-3 shadow-sm">
-          <div className="flex items-center justify-between">
-            <p className="text-[10px] font-medium text-slate-500 uppercase tracking-widest flex items-center gap-1.5">
-              <Clock className="h-3.5 w-3.5" /> Today's Total
-            </p>
-            <p className="text-[20px] font-light text-slate-900 font-mono tracking-tight">
-              {formatTotalTime(completedMinutesToday + (isClockedIn ? Math.floor((Date.now() - new Date(activeSession!.clock_in).getTime()) / 60000) : 0))}
-            </p>
+        {/* Status */}
+        <div className="flex justify-center mt-4 mb-4">
+          <span className="inline-flex items-center gap-[7px] text-[11.5px] font-medium text-[#525252]">
+            <span className="h-1.5 w-1.5 rounded-full" style={{ background: onBreak ? '#E8890C' : isClockedIn ? '#0FA968' : '#B4B4B4' }} />
+            {onBreak ? 'Break' : isClockedIn ? 'Tracking' : 'Ready when you are'}
+          </span>
+        </div>
+
+        {/* Working on */}
+        <div className="flex items-center justify-between py-3 border-t border-b border-[#F2F2F2]">
+          <div className="min-w-0">
+            <div className="text-[9.5px] font-semibold tracking-[.14em] uppercase text-[#B4B4B4] mb-[3px]">Working on</div>
+            <div className={`text-[13.5px] font-medium tracking-[-.01em] truncate ${isClockedIn && activeWebTask !== 'No active web task' ? 'text-[#0A0A0A]' : 'text-[#B4B4B4]'}`}>
+              {isClockedIn ? activeWebTask : 'Nothing yet'}
+            </div>
           </div>
-          {todaySessions.length > 0 && (
+        </div>
+
+        {/* Actions */}
+        <div className="flex gap-2.5 mt-4">
+          {!isClockedIn ? (
+            <button onClick={handleClockIn} disabled={syncing}
+              className="flex-1 h-[46px] rounded-xl bg-[#0A0A0A] text-white text-[13.5px] font-medium disabled:opacity-40 active:scale-[.99] transition-all">
+              Clock in
+            </button>
+          ) : onBreak ? (
             <>
-              <button
-                onClick={() => setShowSessionHistory(!showSessionHistory)}
-                className="flex items-center gap-1.5 text-[11px] text-blue-400 font-medium hover:text-blue-300 transition-colors"
-              >
-                <History className="h-3.5 w-3.5" />
-                {showSessionHistory ? 'Hide' : 'Show'} Sessions ({todaySessions.length})
-                {showSessionHistory ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+              <button onClick={() => endBreak('manual')} disabled={breakBusy}
+                className="flex-[1.3] h-[46px] rounded-xl bg-[#0A0A0A] text-white text-[13.5px] font-medium disabled:opacity-40 active:scale-[.99] transition-all">
+                I&apos;m back
               </button>
-              {showSessionHistory && (
-                <div className="space-y-1.5 pt-2 border-t border-slate-200">
-                  {todaySessions.map(s => {
-                    const clockIn = new Date(s.clock_in)
-                    const clockOut = s.clock_out ? new Date(s.clock_out) : null
-                    const fmtTime = (d: Date) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                    const duration = s.total_minutes ? formatTotalTime(s.total_minutes) : (s.status === 'active' ? 'running' : '–')
-                    return (
-                      <div key={s.id} className="flex items-center justify-between text-[11px] py-1">
-                        <span className="text-slate-500 font-mono tracking-tight">
-                          {fmtTime(clockIn)} → {clockOut ? fmtTime(clockOut) : <span className="text-emerald-400 font-medium drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]">Now</span>}
-                        </span>
-                        <span className={`font-mono ${s.status === 'active' ? 'text-emerald-400 font-medium' : 'text-slate-600'}`}>
-                          {duration}
-                        </span>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
+              <button onClick={handleClockOut} disabled={syncing}
+                className="flex-1 h-[46px] rounded-xl bg-white border border-[#EAEAEA] text-[13.5px] font-medium disabled:opacity-40 hover:bg-[#FAFAFA] transition-colors">
+                Clock out
+              </button>
+            </>
+          ) : (
+            <>
+              <button onClick={startBreak} disabled={breakBusy}
+                className="flex-1 h-[46px] rounded-xl bg-white border border-[#EAEAEA] text-[13.5px] font-medium disabled:opacity-40 hover:bg-[#FAFAFA] transition-colors">
+                Take a break
+              </button>
+              <button onClick={handleClockOut} disabled={syncing}
+                className="flex-1 h-[46px] rounded-xl bg-[#0A0A0A] text-white text-[13.5px] font-medium disabled:opacity-40 active:scale-[.99] transition-all">
+                Clock out
+              </button>
             </>
           )}
-          {todaySessions.length === 0 && !isClockedIn && (
-            <p className="text-[11px] text-slate-500 font-light">No sessions logged today yet.</p>
+        </div>
+
+        {/* Meta line */}
+        <div className="mt-4 text-[11.5px] text-[#8A8A8A]">
+          <button onClick={() => setShowSessionHistory(!showSessionHistory)} className="hover:text-[#0A0A0A] transition-colors">
+            <b className="text-[#0A0A0A] font-semibold tabular-nums">{todaySessions.length}</b> sessions
+          </button>
+          {profile?.activity_tracking_enabled && activityStatus !== 'Disabled' && (
+            <><span className="text-[#B4B4B4] mx-[7px]">·</span><b className="text-[#0A0A0A] font-semibold tabular-nums">{activePercentage}%</b> activity</>
+          )}
+          {breaksToday.count > 0 && (
+            <><span className="text-[#B4B4B4] mx-[7px]">·</span><b className="text-[#0A0A0A] font-semibold tabular-nums">{breaksToday.count}</b> breaks, {breaksToday.minutes}m</>
+          )}
+          {!allPermissionsGranted && (
+            <><span className="text-[#B4B4B4] mx-[7px]">·</span><span className="text-[#E8890C]">permissions needed</span></>
           )}
         </div>
 
-        {/* Gentle reminder: clocked in but no task being tracked */}
-        {isClockedIn && clockInNudge && (
-          <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 text-amber-800 rounded-2xl px-3.5 py-2.5">
-            <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-            <p className="text-[11px] font-medium leading-snug">{clockInNudge}</p>
+        {/* Session history */}
+        {showSessionHistory && todaySessions.length > 0 && (
+          <div className="mt-3 space-y-1 pb-1">
+            {todaySessions.map(s => {
+              const fmt = (d: Date) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+              return (
+                <div key={s.id} className="flex items-center justify-between text-[11.5px] tabular-nums">
+                  <span className="text-[#8A8A8A]">
+                    {fmt(new Date(s.clock_in))} → {s.clock_out ? fmt(new Date(s.clock_out)) : <span className="text-[#0FA968]">now</span>}
+                  </span>
+                  <span className="text-[#525252]">{s.total_minutes ? formatTotalTime(s.total_minutes) : (s.status === 'active' ? 'running' : '–')}</span>
+                </div>
+              )
+            })}
           </div>
         )}
 
-        {/* Secondary Metrics Grid */}
-        <div className="grid grid-cols-2 gap-3">
-          {/* Active Web Task Section */}
-          <div className="bg-white backdrop-blur-md p-3.5 rounded-2xl border border-slate-200 space-y-2 shadow-sm">
-            <p className="text-[9px] font-medium text-slate-500 uppercase tracking-widest">Active Task</p>
-            <div className="flex items-center gap-2">
-              <div className={`h-2 w-2 rounded-full shrink-0 shadow-sm ${isClockedIn && activeWebTask !== 'No active web task' ? 'bg-blue-400 shadow-blue-400/50' : 'bg-slate-600'}`} />
-              <p className="text-[12px] font-medium text-slate-900 truncate tracking-wide">
-                {activeWebTask}
-              </p>
-            </div>
+        {/* ── Banners ── */}
+        {syncError && (
+          <div className="mt-4 px-3.5 py-3 rounded-xl bg-[#FFF5F5] border border-[#F5D2D2] text-[12px] leading-relaxed text-[#9B2C2C]">
+            {syncError}
+            {syncError.includes('Clock Out') && <button onClick={handleClockOut} className="ml-2 font-semibold underline">Retry</button>}
+            {syncError.includes('Clock In') && <button onClick={handleClockIn} className="ml-2 font-semibold underline">Retry</button>}
           </div>
+        )}
 
-          {/* Activity Tracking Status */}
-          {profile?.activity_tracking_enabled && (
-            <div className="bg-white backdrop-blur-md p-3.5 rounded-2xl border border-slate-200 space-y-2 shadow-sm">
-              <p className="text-[9px] font-medium text-slate-500 uppercase tracking-widest">Activity</p>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 min-w-0">
-                  <div className={`h-2 w-2 rounded-full shrink-0 shadow-sm ${
-                    activityStatus === 'Active' ? 'bg-emerald-400 shadow-emerald-400/50' : 
-                    activityStatus === 'Idle' ? 'bg-amber-400 shadow-amber-400/50' : 'bg-slate-600'
-                  }`} />
-                  <p className="text-[12px] font-medium text-slate-900 truncate tracking-wide">
-                    {activityStatus === 'Disabled' ? 'Disabled' : activityStatus}
-                  </p>
-                </div>
-                {activityStatus !== 'Disabled' && (
-                  <div className="text-[10px] font-bold text-slate-500 font-mono">
-                    {activePercentage}%
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Permissions & OS Checklist */}
-        <div className="bg-white backdrop-blur-md p-4 rounded-2xl border border-slate-200 space-y-3 shadow-sm">
-          <p className="text-[10px] font-medium text-slate-500 uppercase tracking-widest flex items-center gap-1.5">
-            <ShieldCheck className={`h-4 w-4 ${allPermissionsGranted ? 'text-emerald-400 drop-shadow-[0_0_8px_rgba(16,185,129,0.3)]' : 'text-amber-400'}`} /> Permissions
-          </p>
-          
-          {allPermissionsGranted ? (
-            <div className="flex items-center gap-2 text-[12px] text-emerald-400 font-medium">
-              <span className="text-emerald-400 font-bold">✓</span> All permissions granted
+        {onBreak && (
+          breakNudged ? (
+            <div className="mt-4 px-3.5 py-3 rounded-xl bg-[#FFFBF4] border border-[#F6E4C8] text-[12px] leading-relaxed text-[#525252]">
+              Hey — you&apos;ve been away about <b className="text-[#0A0A0A] font-semibold">50 minutes</b>. No rush, just tap <b className="text-[#0A0A0A] font-semibold">I&apos;m back</b> when you return. If we don&apos;t hear from you by 60 min we&apos;ll clock you out so your hours stay accurate.
             </div>
           ) : (
-            <div className="space-y-2 text-[12px]">
-              <div className="flex items-center justify-between py-1.5 border-b border-white/5">
-                <span className="text-slate-600 font-light">Screen Capture</span>
-                <div className="flex items-center gap-2">
-                  <span className={`font-medium capitalize ${permissions.screen === 'granted' ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {permissions.screen}
-                  </span>
-                  {permissions.screen !== 'granted' && (
-                    <button 
-                      onClick={() => requestPermission('screen')} 
-                      className="text-[11px] text-blue-400 hover:text-blue-300 font-medium transition-colors"
-                    >
-                      Allow
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between py-1.5">
-                <span className="text-slate-600 font-light">Accessibility</span>
-                <div className="flex items-center gap-2">
-                  <span className={`font-medium capitalize ${permissions.accessibility === 'granted' ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {permissions.accessibility}
-                  </span>
-                  {permissions.accessibility !== 'granted' && (
-                    <button 
-                      onClick={() => requestPermission('accessibility')} 
-                      className="text-[11px] text-blue-400 hover:text-blue-300 font-medium transition-colors"
-                    >
-                      Allow
-                    </button>
-                  )}
-                </div>
-              </div>
+            <div className="mt-4 px-3.5 py-3 rounded-xl bg-[#FAFAFA] border border-[#EAEAEA] text-[12px] leading-relaxed text-[#525252]">
+              Take your time — your task and attendance clocks keep running while you&apos;re away.
             </div>
-          )}
-        </div>
+          )
+        )}
+
+        {isClockedIn && !onBreak && clockInNudge && (
+          <div className="mt-4 px-3.5 py-3 rounded-xl bg-[#FFFBF4] border border-[#F6E4C8] text-[12px] leading-relaxed text-[#525252]">
+            {clockInNudge}
+          </div>
+        )}
+
+        {!allPermissionsGranted && (
+          <div className="mt-4 px-3.5 py-3 rounded-xl bg-[#FAFAFA] border border-[#EAEAEA] text-[12px] text-[#525252] space-y-1.5">
+            {permissions.screen !== 'granted' && (
+              <div className="flex items-center justify-between">
+                <span>Screen recording · <span className="capitalize text-[#8A8A8A]">{permissions.screen}</span></span>
+                <button onClick={() => requestPermission('screen')} className="font-semibold text-[#0A0A0A] underline">Allow</button>
+              </div>
+            )}
+            {permissions.accessibility !== 'granted' && (
+              <div className="flex items-center justify-between">
+                <span>Accessibility · <span className="capitalize text-[#8A8A8A]">{permissions.accessibility}</span></span>
+                <button onClick={() => requestPermission('accessibility')} className="font-semibold text-[#0A0A0A] underline">Allow</button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {(queueStats.pendingCount > 0 || queueStats.failedCount > 0 || !isOnline) && (
+          <div className="mt-4 px-3.5 py-3 rounded-xl bg-[#FAFAFA] border border-[#EAEAEA] text-[12px] text-[#525252] flex items-center justify-between">
+            <span className="flex items-center gap-2">
+              <RefreshCw className={`h-3.5 w-3.5 ${!isOnline ? 'text-[#B4B4B4]' : queueStats.pendingCount > 0 ? 'text-[#0A0A0A] animate-spin' : 'text-[#0FA968]'}`} />
+              {!isOnline ? 'Offline — saved on this device' : queueStats.pendingCount > 0 ? `Syncing ${queueStats.pendingCount}…` : 'Synced'}
+            </span>
+            {queueStats.failedCount > 0 && isOnline && (
+              <button onClick={async () => { if (window.electronAPI) { await window.electronAPI.forceSyncRetry(); startSyncManager() } }}
+                className="font-semibold text-[#0A0A0A] underline">Retry {queueStats.failedCount}</button>
+            )}
+          </div>
+        )}
+
+        <div className="h-4 shrink-0" />
       </div>
 
-      {/* Clock In / Out Toggle Button & Footer */}
-      <div className="p-5 bg-slate-50/80 backdrop-blur-xl border-t border-slate-200 shadow-[0_-10px_30px_rgba(0,0,0,0.5)] flex flex-col gap-4 shrink-0 z-20">
-        
-        {/* Phase 4D: Sync Manager UI */}
-        {(queueStats.pendingCount > 0 || queueStats.failedCount > 0 || !isOnline) && (
-          <div className="flex items-center justify-between bg-white backdrop-blur-md p-3 rounded-xl border border-slate-200 shadow-inner">
-            <div className="flex items-center gap-2 text-[11px] text-slate-600 font-medium">
-              <RefreshCw className={`h-4 w-4 ${!isOnline ? 'text-slate-500' : (queueStats.pendingCount > 0 ? 'text-blue-400 animate-spin' : 'text-emerald-400')}`} />
-              <span>
-                {!isOnline ? 'Offline: Data queued locally' : 
-                 (queueStats.pendingCount > 0 ? `Syncing ${queueStats.pendingCount} items...` : 'Sync complete')}
-              </span>
-            </div>
-            {queueStats.failedCount > 0 && isOnline && (
-              <button 
-                onClick={async () => {
-                  if (window.electronAPI) {
-                    await window.electronAPI.forceSyncRetry()
-                    startSyncManager()
-                  }
-                }}
-                className="text-[10px] text-slate-900 bg-rose-500/20 border border-rose-500/30 px-2.5 py-1.5 rounded-lg font-medium hover:bg-rose-500/40 transition-colors"
-              >
-                Retry {queueStats.failedCount} Failed
-              </button>
-            )}
-          </div>
-        )}
-
-        <div className="flex gap-3">
-          {isClockedIn ? (
-            <button
-              onClick={handleClockOut}
-              disabled={syncing}
-              className="flex-1 h-12 bg-rose-600 hover:bg-rose-500 text-slate-900 active:scale-[0.98] disabled:opacity-50 font-medium rounded-xl text-[14px] flex items-center justify-center gap-2 transition-all shadow-sm shadow-rose-600/20 border border-rose-500/50"
-            >
-              <Square className="h-4 w-4" /> Clock Out
-            </button>
-          ) : (
-            <button
-              onClick={handleClockIn}
-              disabled={syncing}
-              className="flex-1 h-12 bg-blue-600 hover:bg-blue-500 text-slate-900 active:scale-[0.98] disabled:opacity-50 font-medium rounded-xl text-[14px] flex items-center justify-center gap-2 transition-all shadow-sm shadow-blue-600/20 border border-blue-500/50"
-            >
-              <Play className="h-4 w-4 fill-white ml-0.5" /> Clock In
-            </button>
-          )}
-        </div>
-
-        {/* Footer info: Last Sync and Version */}
-        <div className="flex justify-between items-center text-[10px] text-slate-500 font-light px-1 select-none tracking-wide">
-          <div>
-            {isClockedIn && (
-              heartbeatFailed ? (
-                <span className="text-rose-400 font-medium animate-pulse">Sync issue. Retrying...</span>
-              ) : (
-                <span>Last Sync: {lastSyncTime || 'Pending...'}</span>
-              )
-            )}
-          </div>
-          {/* App Version Info */}
-          <div className="flex items-center gap-3">
-            {updaterStatus 
-              ? <span className={`text-[11px] font-medium animate-pulse ${updaterStatus.includes('error') || updaterStatus.includes('failed') ? 'text-rose-500' : 'text-blue-500'}`}>{updaterStatus}</span>
-              : <button
-                  onClick={async () => {
-                    if (window.electronAPI?.checkForUpdates) {
-                      setUpdaterStatus('Checking...')
-                      await window.electronAPI.checkForUpdates()
-                    }
-                  }}
-                  className="text-[11px] text-slate-400 hover:text-blue-500 transition-colors underline underline-offset-2"
-                  title="Click to manually check for updates"
-                >
-                  vTrack v{appVersion || '...'}
-                </button>
-            }
-          </div>
-        </div>
+      {/* ── Footer ── */}
+      <div className="flex items-center justify-between px-6 py-3.5 border-t border-[#F2F2F2] text-[10.5px] text-[#B4B4B4] shrink-0">
+        <span>
+          {isClockedIn
+            ? (heartbeatFailed ? <span className="text-[#E8890C]">Reconnecting…</span> : `Synced ${lastSyncTime || '—'}`)
+            : ''}
+        </span>
+        {updaterStatus
+          ? <span className="text-[#525252]">{updaterStatus}</span>
+          : <button
+              onClick={async () => { if (window.electronAPI?.checkForUpdates) { setUpdaterStatus('Checking…'); await window.electronAPI.checkForUpdates() } }}
+              className="hover:text-[#0A0A0A] transition-colors" title="Check for updates">
+              v{appVersion || '…'}
+            </button>}
       </div>
     </div>
   )
