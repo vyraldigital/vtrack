@@ -252,7 +252,19 @@ export default function App() {
               } else success = true
             } else if (item.type === 'screenshot') {
               const readResult = await window.electronAPI.readTempScreenshot(item.file_path)
-              if (!readResult.success) throw new Error(readResult.error || 'Failed to read local screenshot')
+              if (!readResult.success) {
+                // If the local file is gone — temp cleared, disk cleaned, machine
+                // rebooted — there is nothing left to upload and no number of
+                // retries can change that. Drop it, or the queue sticks on this
+                // item forever: 5 tries → "failed" → the person hits Retry → 5
+                // more. Any other read error is treated as transient and retried.
+                if (/ENOENT|no such file/i.test(readResult.error || '')) {
+                  console.warn('Dropping screenshot whose local file is gone:', item.file_path)
+                  await window.electronAPI.deleteQueueItem(item.local_id)
+                  continue
+                }
+                throw new Error(readResult.error || 'Failed to read local screenshot')
+              }
               
               const { error: uploadError } = await supabase.storage.from('desktop-screenshots').upload(item.payload_json.storage_path, readResult.buffer, { contentType: 'image/jpeg', upsert: true })
               if (uploadError) throw uploadError
