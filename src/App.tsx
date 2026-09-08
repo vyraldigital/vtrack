@@ -1748,8 +1748,18 @@ export default function App() {
         {(queueStats.pendingCount > 0 || queueStats.failedCount > 0 || !isOnline) && (
           <div className="mt-4 px-3.5 py-3 rounded-xl bg-[#FAFAFA] border border-[#EAEAEA] text-[12px] text-[#525252] flex items-center justify-between">
             <span className="flex items-center gap-2">
-              <RefreshCw className={`h-3.5 w-3.5 ${!isOnline ? 'text-[#B4B4B4]' : queueStats.pendingCount > 0 ? 'text-[#0A0A0A] animate-spin' : 'text-[#0FA968]'}`} />
-              {!isOnline ? 'Offline — saved on this device' : queueStats.pendingCount > 0 ? `Syncing ${queueStats.pendingCount}…` : 'Synced'}
+              <RefreshCw className={`h-3.5 w-3.5 ${
+                !isOnline ? 'text-[#B4B4B4]'
+                : queueStats.pendingCount > 0 ? 'text-[#0A0A0A] animate-spin'
+                : queueStats.failedCount > 0 ? 'text-[#E8890C]'
+                : 'text-[#0FA968]'}`} />
+              {!isOnline
+                ? 'Offline — saved on this device'
+                : queueStats.pendingCount > 0
+                  ? `Syncing ${queueStats.pendingCount}…`
+                  : queueStats.failedCount > 0
+                    ? `${queueStats.failedCount} ${queueStats.failedCount === 1 ? 'record' : 'records'} didn't reach the server`
+                    : 'Synced'}
             </span>
             {queueStats.failedCount > 0 && isOnline && (
               <button onClick={async () => { if (window.electronAPI) { await window.electronAPI.forceSyncRetry(); startSyncManager() } }}
