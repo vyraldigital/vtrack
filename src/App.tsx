@@ -132,6 +132,12 @@ export default function App() {
   const [breakBusy, setBreakBusy] = useState(false)
   const [breaksToday, setBreaksToday] = useState<{ count: number; minutes: number }>({ count: 0, minutes: 0 })
   const activeBreakRef = useRef<{ id: string; started_at: string } | null>(null)
+  // started_at comes from the SERVER clock; Date.now() is this machine's. Even a
+  // second of drift (or the RPC round trip) made the timer render "-1:-1" on the
+  // first tick of every break. Worse, a machine running FAST would compute a huge
+  // elapsed and instantly auto-end the break — we've already seen a PC 9 hours out.
+  // So once a break starts we measure from a LOCAL anchor and ignore the skew.
+  const breakAnchorRef = useRef<{ id: string; localStart: number } | null>(null)
   const breakLimitHandledRef = useRef<boolean>(false)
 
   const activeSessionRef = useRef<any>(null)
@@ -592,6 +598,7 @@ export default function App() {
       if (error) throw error
       const brk = data as { id: string; started_at: string }
       setActiveBreak(brk); activeBreakRef.current = brk
+      breakAnchorRef.current = { id: brk.id, localStart: Date.now() }
       setBreakNudged(false); breakLimitHandledRef.current = false
     } catch (e: any) {
       setSyncError(e?.message || 'Could not start the break. Please try again.')
@@ -693,11 +700,20 @@ export default function App() {
     return () => { cancelled = true }
   }, [session?.user?.id, activeSession?.id])
 
+  // Milliseconds this break has been running. Prefers the local anchor set when
+  // the break started; falls back to the server timestamp (app relaunched
+  // mid-break), and never goes negative.
+  const breakElapsedMs = (brk: { id: string; started_at: string }) => {
+    const anchor = breakAnchorRef.current
+    if (anchor && anchor.id === brk.id) return Math.max(0, Date.now() - anchor.localStart)
+    return Math.max(0, Date.now() - new Date(brk.started_at).getTime())
+  }
+
   // Break ticker: drives the on-screen timer, the 50m nudge and the 60m wrap-up.
   useEffect(() => {
     if (!activeBreak) { setBreakStr('0:00'); return }
     const tick = async () => {
-      const ms = Date.now() - new Date(activeBreak.started_at).getTime()
+      const ms = breakElapsedMs(activeBreak)
       const mins = Math.floor(ms / 60000)
       setBreakStr(`${mins}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`)
 
@@ -1537,7 +1553,7 @@ export default function App() {
   const DIAL_C = 2 * Math.PI * DIAL_R
   const onBreak = !!activeBreak
   const elapsedMs = isClockedIn && activeSession ? Date.now() - new Date(activeSession.clock_in).getTime() : 0
-  const breakMs = activeBreak ? Date.now() - new Date(activeBreak.started_at).getTime() : 0
+  const breakMs = activeBreak ? breakElapsedMs(activeBreak) : 0
   // On a break the ring counts toward the 60-minute wrap-up; otherwise it shows
   // the shift filling up (8h reference).
   const dialPct = onBreak
@@ -1661,7 +1677,7 @@ export default function App() {
             <><span className="text-[#B4B4B4] mx-[7px]">·</span><b className="text-[#0A0A0A] font-semibold tabular-nums">{activePercentage}%</b> activity</>
           )}
           {breaksToday.count > 0 && (
-            <><span className="text-[#B4B4B4] mx-[7px]">·</span><b className="text-[#0A0A0A] font-semibold tabular-nums">{breaksToday.count}</b> breaks, {breaksToday.minutes}m</>
+            <><span className="text-[#B4B4B4] mx-[7px]">·</span><b className="text-[#0A0A0A] font-semibold tabular-nums">{breaksToday.count}</b> {breaksToday.count === 1 ? 'break' : 'breaks'}, {breaksToday.minutes}m</>
           )}
           {!allPermissionsGranted && (
             <><span className="text-[#B4B4B4] mx-[7px]">·</span><span className="text-[#E8890C]">permissions needed</span></>
