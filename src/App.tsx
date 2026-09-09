@@ -91,7 +91,8 @@ export default function App() {
 
   // Phase 4D State
   const [isOnline, setIsOnline] = useState(navigator.onLine)
-  const [queueStats, setQueueStats] = useState({ pendingCount: 0, failedCount: 0 })
+  type FailedDetail = { type: string; error: string; retries: number }
+  const [queueStats, setQueueStats] = useState<{ pendingCount: number; failedCount: number; failedDetail?: FailedDetail[] }>({ pendingCount: 0, failedCount: 0 })
   const syncLoopIntervalRef = useRef<any | null>(null)
   
   const heartbeatIntervalRef = useRef<any | null>(null)
@@ -313,6 +314,18 @@ export default function App() {
           } catch (e: any) {
             console.error('Sync item failed:', e)
             errMsg = e.message
+          }
+
+          // Postgres rejected the row itself — a foreign key to something that no
+          // longer exists, a null in a required column, a malformed value. The
+          // server will reject it identically every time, so retrying only keeps
+          // the queue stuck. Drop it and move on. (Duplicates are handled above as
+          // success, since the row is already there.)
+          const permanent = /23503|23502|23514|22P02|22007|22008|violates foreign key|violates not-null|violates check|invalid input syntax/i.test(errMsg)
+          if (!success && permanent) {
+            console.warn('Dropping permanently rejected queue item:', item.type, errMsg)
+            await window.electronAPI.deleteQueueItem(item.local_id)
+            continue
           }
 
           if (success) {
@@ -1777,6 +1790,18 @@ export default function App() {
               <button onClick={async () => { if (window.electronAPI) { await window.electronAPI.forceSyncRetry(); startSyncManager() } }}
                 className="font-semibold text-[#0A0A0A] underline">Retry {queueStats.failedCount}</button>
             )}
+          </div>
+        )}
+
+        {/* Why they're stuck — otherwise the count is a dead end for the person
+            looking at it and undiagnosable for us. */}
+        {queueStats.failedCount > 0 && isOnline && (queueStats.failedDetail?.length ?? 0) > 0 && (
+          <div className="mt-2 px-3.5 py-2.5 rounded-xl bg-[#FFFBF4] border border-[#F6E4C8] text-[11px] text-[#92400E] space-y-1">
+            {queueStats.failedDetail!.map((f, i) => (
+              <div key={i} className="break-words">
+                <b className="font-semibold">{f.type}</b> · after {f.retries} tries — {f.error}
+              </div>
+            ))}
           </div>
         )}
 

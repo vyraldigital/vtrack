@@ -632,8 +632,15 @@ ipcMain.handle('get-queue-stats', async () => {
     queueDb.find({}, (err, docs) => {
       if (err) return reject(err);
       const pendingCount = docs.filter(d => d.status === 'pending').length;
-      const failedCount = docs.filter(d => d.status === 'failed').length;
-      resolve({ pendingCount, failedCount });
+      const failed = docs.filter(d => d.status === 'failed');
+      // Carry the reason back to the UI. Without it a stuck item is invisible —
+      // the person sees a count they can't act on and we can't diagnose remotely.
+      const failedDetail = failed.slice(0, 5).map(d => ({
+        type: d.type,
+        error: (d.error_message || 'Unknown error').slice(0, 300),
+        retries: d.retry_count || 0,
+      }));
+      resolve({ pendingCount, failedCount: failed.length, failedDetail });
     });
   });
 });
