@@ -42,7 +42,13 @@ export interface ElectronAPI {
   getSyncQueue: () => Promise<any[]>;
   updateQueueItem: (local_id: string, updates: any) => Promise<number>;
   deleteQueueItem: (local_id: string) => Promise<number>;
-  getQueueStats: () => Promise<{pendingCount: number, failedCount: number, failedDetail?: {type: string, error: string, retries: number}[]}>;
+  getQueueStats: () => Promise<{
+    pendingCount: number
+    quarantinedCount: number
+    nextAttemptAt: string | null
+    oldestPendingAt: string | null
+    quarantinedDetail: { type: string; error: string; since: string | null }[]
+  }>;
   forceSyncRetry: () => Promise<number>;
   onPowerStateChange: (callback: (state: 'suspend' | 'resume') => void) => () => void;
   getAppVersion: () => Promise<string>;

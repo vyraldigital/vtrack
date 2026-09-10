@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { backoffMs, classify, QUARANTINE_RETRY_MS } from './syncPolicy'
 import { supabase } from './supabase'
 import { Fingerprint, LogOut, AlertTriangle, Clock, RefreshCw } from 'lucide-react'
 
@@ -91,9 +92,48 @@ export default function App() {
 
   // Phase 4D State
   const [isOnline, setIsOnline] = useState(navigator.onLine)
-  type FailedDetail = { type: string; error: string; retries: number }
-  const [queueStats, setQueueStats] = useState<{ pendingCount: number; failedCount: number; failedDetail?: FailedDetail[] }>({ pendingCount: 0, failedCount: 0 })
+  type QueueStats = {
+    pendingCount: number
+    quarantinedCount: number
+    nextAttemptAt: string | null
+    oldestPendingAt: string | null
+    quarantinedDetail: { type: string; error: string; since: string | null }[]
+  }
+  const [queueStats, setQueueStats] = useState<QueueStats>({ pendingCount: 0, quarantinedCount: 0, nextAttemptAt: null, oldestPendingAt: null, quarantinedDetail: [] })
+  const [syncInFlight, setSyncInFlight] = useState(false)
   const syncLoopIntervalRef = useRef<any | null>(null)
+  // One sync pass at a time. A pass can outlast the 15s tick (a batch of screenshot
+  // uploads on a slow line), and overlapping passes would send the same records
+  // twice. Anyone who needs the queue flushed awaits the running pass instead.
+  const syncPassRef = useRef<Promise<void> | null>(null)
+  const runSyncRef = useRef<(() => Promise<void>) | null>(null)
+  // Breaks this app has ended whose end may not have reached the server yet.
+  const endedBreakIdsRef = useRef<Set<string>>(new Set())
+
+  // Keep a record on this device until the server confirms it. Every data write
+  // that fails lands here, and the sync pass takes it from there.
+  const queueRecord = async (type: string, payload_json: Record<string, unknown>, extra: { file_path?: string } = {}) => {
+    if (!window.electronAPI) return
+    try {
+      await window.electronAPI.enqueueSyncItem({ type, payload_json, idempotency_key: crypto.randomUUID(), ...extra })
+    } catch (e) {
+      console.error('Could not keep record on this device:', type, e)
+    }
+  }
+
+  // A timer stop carries its own end time, and the server ignores a stop for a timer
+  // that's already stopped (resuming always opens a NEW timer), so a stop that fails
+  // now can safely be sent later.
+  const stopTimerOrQueue = async (sessionId: string, endIso: string) => {
+    let sent = false
+    if (navigator.onLine) {
+      try {
+        const { error } = await supabase.rpc('desktop_timer_stop', { p_session_id: sessionId, p_end_time: endIso })
+        sent = !error
+      } catch { /* kept below */ }
+    }
+    if (!sent) await queueRecord('timer_stop', { session_id: sessionId, end_time: endIso })
+  }
   
   const heartbeatIntervalRef = useRef<any | null>(null)
   const clockTimerIntervalRef = useRef<any | null>(null)
@@ -244,15 +284,21 @@ function isAlreadyExists(err: unknown): boolean {
 
   // Phase 4D: Track Online Status
   useEffect(() => {
-    const handleOnline = () => setIsOnline(true)
+    // Back online: everything waiting out a retry delay goes now.
+    const handleOnline = () => {
+      setIsOnline(true)
+      ;(async () => {
+        try { await window.electronAPI?.forceSyncRetry() } catch { /* best-effort */ }
+        runSyncRef.current?.()
+      })()
+    }
     const handleOffline = () => setIsOnline(false)
     window.addEventListener('online', handleOnline)
     window.addEventListener('offline', handleOffline)
     
-    // Start the sync manager on mount, but first give anything that failed under an
-    // earlier build a fresh set of retries. A fix shipped in an update should heal
-    // stuck records by itself, not wait for someone to press Retry. Bounded:
-    // anything still failing uses its 5 attempts and parks again.
+    // Start the sync manager on mount, but first make every kept record due now
+    // (including any parked by an earlier build) so a fix shipped in an update
+    // heals stuck records by itself.
     ;(async () => {
       try { await window.electronAPI?.forceSyncRetry() } catch { /* best-effort */ }
       startSyncManager()
@@ -269,72 +315,66 @@ function isAlreadyExists(err: unknown): boolean {
   const startSyncManager = () => {
     if (syncLoopIntervalRef.current) clearInterval(syncLoopIntervalRef.current)
 
-    const processQueue = async () => {
-      if (!navigator.onLine || !window.electronAPI) return
-      
-      try {
-        const stats = await window.electronAPI.getQueueStats()
-        setQueueStats(stats)
-        
-        if (stats.pendingCount === 0) return
+    // Send every record that is due. Records stay on this device until the server
+    // confirms them: a failure that can clear up by itself is retried forever on a
+    // growing delay, and a record the server rejects is kept (never deleted) and
+    // offered again every few hours. Nobody has to press anything.
+    const pass = async () => {
+      if (!window.electronAPI) return
+      if (!navigator.onLine) {
+        try { setQueueStats(await window.electronAPI.getQueueStats()) } catch { /* cosmetic */ }
+        return
+      }
+      // Signed out: leave everything kept; it goes once someone signs in again.
+      const { data: { session: authed } } = await supabase.auth.getSession()
+      if (!authed) return
 
-        const queue = await window.electronAPI.getSyncQueue()
+      setSyncInFlight(true)
+      try {
+        const queue = await window.electronAPI.getSyncQueue()  // due now, oldest first
         for (const item of queue) {
-          if (item.status !== 'pending') continue
-          
           let success = false
           let errMsg = ''
+          let errCode: string | null = null
+          let fileGone = false
 
           try {
             if (item.type === 'activity_log') {
               const { error } = await supabase.from('activity_logs').insert(item.payload_json)
               if (error) {
-                if (error.code === '23505') success = true // Deduplicate via idempotency_key
+                if (error.code === '23505') success = true // already there (idempotency_key)
                 else throw error
               } else success = true
             } else if (item.type === 'screenshot') {
               const readResult = await window.electronAPI.readTempScreenshot(item.file_path)
               if (!readResult.success) {
-                // If the local file is gone — temp cleared, disk cleaned, machine
-                // rebooted — there is nothing left to upload and no number of
-                // retries can change that. Drop it, or the queue sticks on this
-                // item forever: 5 tries → "failed" → the person hits Retry → 5
-                // more. Any other read error is treated as transient and retried.
-                if (/ENOENT|no such file/i.test(readResult.error || '')) {
-                  console.warn('Dropping screenshot whose local file is gone:', item.file_path)
-                  await window.electronAPI.deleteQueueItem(item.local_id)
-                  continue
-                }
+                // The image file is gone from this device: nothing left to upload.
+                // The record is still kept, so the loss stays visible.
+                fileGone = /ENOENT|no such file/i.test(readResult.error || '')
                 throw new Error(readResult.error || 'Failed to read local screenshot')
               }
-              
-              // Never upsert. An earlier attempt may have uploaded this file and then
-              // failed before its row was written. Retrying with upsert means
-              // OVERWRITING, which the bucket rightly refuses (nobody should be able to
-              // replace their own monitoring screenshots), so the retry failed RLS
-              // forever and hid the original error. If the file is already there, the
-              // upload step is done: go write the row.
+              // Never upsert: overwriting needs a permission the bucket deliberately
+              // withholds. A file already there means an earlier attempt uploaded it.
               const { error: uploadError } = await supabase.storage.from('desktop-screenshots').upload(item.payload_json.storage_path, readResult.buffer, { contentType: 'image/jpeg', upsert: false })
               if (uploadError && !isAlreadyExists(uploadError)) throw uploadError
-              
+
               const { error: dbError } = await supabase.from('screenshots').insert(item.payload_json)
               if (dbError) {
                 if (dbError.code === '23505') success = true
                 else throw dbError
               } else success = true
             } else if (item.type === 'clock_out') {
-              // Direct update for offline clock-out syncing
+              // Offline clock-out: carries the moment the person clicked.
               const { error: updateError } = await supabase.from('attendance_sessions').update({
                 status: 'completed',
                 clock_out: item.payload_json.clock_out,
                 total_minutes: item.payload_json.total_minutes,
                 sync_status: 'offline_synced'
               }).eq('id', item.payload_json.session_id)
-
               if (updateError) throw updateError
               success = true
             } else if (item.type === 'timer_heartbeat') {
-              // Keep the active task timer alive (offline-buffered heartbeat)
+              // The server keeps the newest heartbeat, so a late one is harmless.
               const { error } = await supabase.rpc('desktop_timer_heartbeat', {
                 p_session_id: item.payload_json.session_id,
                 p_at: item.payload_json.at
@@ -342,7 +382,7 @@ function isAlreadyExists(err: unknown): boolean {
               if (error) throw error
               success = true
             } else if (item.type === 'timer_stop') {
-              // Stop the task timer at clock-out (offline-buffered)
+              // Carries its own end time; stopping an already-stopped timer is a no-op.
               const { error } = await supabase.rpc('desktop_timer_stop', {
                 p_session_id: item.payload_json.session_id,
                 p_end_time: item.payload_json.end_time
@@ -350,55 +390,88 @@ function isAlreadyExists(err: unknown): boolean {
               if (error) throw error
               success = true
             } else if (item.type === 'timer_flag') {
-              // Flag a long idle gap on the task timer for admin review
               const { error } = await supabase.rpc('desktop_timer_flag', {
                 p_session_id: item.payload_json.session_id,
                 p_reason: item.payload_json.reason
               })
               if (error) throw error
               success = true
+            } else if (item.type === 'break_end') {
+              // Needs supabase/work_breaks_end_at.sql. Until it's applied the call fails
+              // as "function not found", which is retried, so the record waits safely.
+              const { error } = await supabase.rpc('desktop_break_end', {
+                p_reason: item.payload_json.reason,
+                p_ended_at: item.payload_json.ended_at,
+                p_break_id: item.payload_json.break_id
+              })
+              if (error) throw error
+              success = true
+            } else if (item.type === 'attendance_flag') {
+              const { error } = await supabase.from('attendance_sessions').update({
+                needs_review: true,
+                review_reason: item.payload_json.review_reason,
+                offline_minutes: item.payload_json.offline_minutes
+              }).eq('id', item.payload_json.session_id)
+              if (error) throw error
+              success = true
+            } else {
+              throw new Error(`Unknown record type: ${item.type}`)
             }
           } catch (e: any) {
-            console.error('Sync item failed:', e)
-            errMsg = e.message
-          }
-
-          // Postgres rejected the row itself — a foreign key to something that no
-          // longer exists, a null in a required column, a malformed value. The
-          // server will reject it identically every time, so retrying only keeps
-          // the queue stuck. Drop it and move on. (Duplicates are handled above as
-          // success, since the row is already there.)
-          const permanent = /23503|23502|23514|22P02|22007|22008|violates foreign key|violates not-null|violates check|invalid input syntax/i.test(errMsg)
-          if (!success && permanent) {
-            console.warn('Dropping permanently rejected queue item:', item.type, errMsg)
-            await window.electronAPI.deleteQueueItem(item.local_id)
-            continue
+            errMsg = e?.message || String(e)
+            errCode = typeof e?.code === 'string' ? e.code : null
           }
 
           if (success) {
             await window.electronAPI.deleteQueueItem(item.local_id)
-          } else {
-            const newRetries = item.retry_count + 1
+            continue
+          }
+
+          const now = Date.now()
+          const attempts = (item.retry_count || 0) + 1
+          const rejected = fileGone || errMsg.startsWith('Unknown record type') || classify(errMsg, errCode) === 'permanent'
+          if (rejected) {
+            console.warn('Record kept on this device, server cannot accept it yet:', item.type, errMsg)
             await window.electronAPI.updateQueueItem(item.local_id, {
-              retry_count: newRetries,
-              status: newRetries >= 5 ? 'failed' : 'pending',
+              status: 'quarantined',
+              retry_count: attempts,
+              error_message: fileGone ? 'The screenshot image is no longer on this device' : errMsg,
+              last_attempt_at: new Date(now).toISOString(),
+              quarantined_at: item.quarantined_at || new Date(now).toISOString(),
+              next_attempt_at: new Date(now + QUARANTINE_RETRY_MS).toISOString()
+            })
+          } else {
+            console.error('Sync item failed, will retry:', item.type, errMsg)
+            await window.electronAPI.updateQueueItem(item.local_id, {
+              status: 'pending',
+              retry_count: attempts,
               error_message: errMsg,
-              last_attempt_at: new Date().toISOString()
+              last_attempt_at: new Date(now).toISOString(),
+              next_attempt_at: new Date(now + backoffMs(attempts - 1)).toISOString()
             })
           }
         }
-        
-        // Refresh stats after processing
-        setQueueStats(await window.electronAPI.getQueueStats())
         setLastSyncTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))
-      } catch(e) {
+      } catch (e) {
         console.error('Sync manager error:', e)
+      } finally {
+        setSyncInFlight(false)
+        try { setQueueStats(await window.electronAPI.getQueueStats()) } catch { /* cosmetic */ }
       }
     }
-    
-    // Run once immediately, then every 15 seconds
-    processQueue()
-    syncLoopIntervalRef.current = setInterval(processQueue, 15000)
+
+    // One pass at a time; a caller that asks while one runs waits for that one.
+    const run = () => {
+      if (!syncPassRef.current) {
+        syncPassRef.current = pass().finally(() => { syncPassRef.current = null })
+      }
+      return syncPassRef.current
+    }
+    runSyncRef.current = run
+
+    // Once now, then every 15 seconds. Each pass only sends what's due.
+    run()
+    syncLoopIntervalRef.current = setInterval(run, 15000)
   }
 
   // 2. Clock timer and tasks poll when session status changes
@@ -666,9 +739,18 @@ function isAlreadyExists(err: unknown): boolean {
     if (!activeSession || activeBreakRef.current) return
     setBreakBusy(true)
     try {
+      // Send any break end still waiting on this device first. Starting a break
+      // returns whatever break is open on the server, so an unsent "I'm back" would
+      // make this new break quietly continue the old one.
+      try { await window.electronAPI?.forceSyncRetry() } catch { /* best-effort */ }
+      await runSyncRef.current?.()
       const { data, error } = await supabase.rpc('desktop_break_start')
       if (error) throw error
       const brk = data as { id: string; started_at: string }
+      if (endedBreakIdsRef.current.has(brk.id)) {
+        setSyncError('Still sending the end of your last break. Try again in a moment.')
+        return
+      }
       setActiveBreak(brk); activeBreakRef.current = brk
       breakAnchorRef.current = { id: brk.id, localStart: Date.now() }
       setBreakNudged(false); breakLimitHandledRef.current = false
@@ -678,12 +760,25 @@ function isAlreadyExists(err: unknown): boolean {
   }
 
   const endBreak = async (reason: 'manual' | 'auto_60m' | 'clock_out' = 'manual') => {
-    if (!activeBreakRef.current) return
+    const brk = activeBreakRef.current
+    if (!brk) return
     setBreakBusy(true)
+    endedBreakIdsRef.current.add(brk.id)
+    // When they actually came back, measured on this machine from the break's start
+    // (immune to a wrong PC clock; see breakElapsedMs). Sent with a retry so a late
+    // end still records the true time.
+    const endedAt = new Date(new Date(brk.started_at).getTime() + breakElapsedMs(brk)).toISOString()
     try {
-      await supabase.rpc('desktop_break_end', { p_reason: reason })
-    } catch (e) {
-      console.error('End break failed:', e)
+      let sent = false
+      if (navigator.onLine) {
+        try {
+          const { error } = await supabase.rpc('desktop_break_end', { p_reason: reason })
+          sent = !error
+        } catch { /* kept below */ }
+      }
+      // A break that fails to end stays OPEN on the server. Keep the end on this
+      // device until it lands.
+      if (!sent) await queueRecord('break_end', { reason, ended_at: endedAt, break_id: brk.id })
     } finally {
       setActiveBreak(null); activeBreakRef.current = null
       setBreakNudged(false); breakLimitHandledRef.current = false
@@ -706,13 +801,16 @@ function isAlreadyExists(err: unknown): boolean {
       // minute, flag the session so a human can verify it against screenshots.
       await endBreak('manual')
       const tsId = activeTimeSessionIdRef.current
-      if (tsId && navigator.onLine) {
-        try {
-          await supabase.rpc('desktop_timer_flag', {
-            p_session_id: tsId,
-            p_reason: 'Break mode left on past 60m while active — verify against screenshots',
-          })
-        } catch { /* flagging is best-effort */ }
+      if (tsId) {
+        const reason = 'Break mode left on past 60m while active — verify against screenshots'
+        let flagSent = false
+        if (navigator.onLine) {
+          try {
+            const { error } = await supabase.rpc('desktop_timer_flag', { p_session_id: tsId, p_reason: reason })
+            flagSent = !error
+          } catch { /* kept below */ }
+        }
+        if (!flagSent) await queueRecord('timer_flag', { session_id: tsId, reason })
       }
       return
     }
@@ -724,7 +822,7 @@ function isAlreadyExists(err: unknown): boolean {
     try {
       const tsId = activeTimeSessionIdRef.current
       if (tsId) {
-        try { await supabase.rpc('desktop_timer_stop', { p_session_id: tsId, p_end_time: new Date(creditedEnd).toISOString() }) } catch {}
+        await stopTimerOrQueue(tsId, new Date(creditedEnd).toISOString())
         activeTimeSessionIdRef.current = null
       }
       // Reuse the proven idle clock-out path; idle minutes are measured back from
@@ -755,6 +853,9 @@ function isAlreadyExists(err: unknown): boolean {
     let cancelled = false
     ;(async () => {
       try {
+        // Send any kept break end first, or a break this person already ended could
+        // be restored as if it were still running.
+        await runSyncRef.current?.()
         const { data } = await supabase
           .from('work_breaks')
           .select('id, started_at')
@@ -763,7 +864,7 @@ function isAlreadyExists(err: unknown): boolean {
           .order('started_at', { ascending: false })
           .limit(1)
         const open = data?.[0] as { id: string; started_at: string } | undefined
-        if (!cancelled && open && activeSessionRef.current) {
+        if (!cancelled && open && activeSessionRef.current && !endedBreakIdsRef.current.has(open.id)) {
           setActiveBreak(open); activeBreakRef.current = open
         }
       } catch { /* pre-migration — no breaks yet */ }
@@ -852,11 +953,7 @@ function isAlreadyExists(err: unknown): boolean {
       // Auto-stop any running task timer at clock-out (wall-clock end)
       const tsIdOnline = activeTimeSessionIdRef.current
       if (tsIdOnline) {
-        try {
-          await supabase.rpc('desktop_timer_stop', { p_session_id: tsIdOnline, p_end_time: new Date().toISOString() })
-        } catch (e) {
-          console.error('Timer stop on clock-out failed:', e)
-        }
+        await stopTimerOrQueue(tsIdOnline, new Date().toISOString())
         activeTimeSessionIdRef.current = null
       }
 
@@ -1001,19 +1098,16 @@ function isAlreadyExists(err: unknown): boolean {
       const tsId = activeTimeSessionIdRef.current
       if (tsId) {
         const nowIso = new Date().toISOString()
-        try {
-          if (!navigator.onLine && window.electronAPI) {
-            await window.electronAPI.enqueueSyncItem({
-              type: 'timer_heartbeat',
-              payload_json: { session_id: tsId, at: nowIso },
-              idempotency_key: crypto.randomUUID()
-            })
-          } else {
-            await supabase.rpc('desktop_timer_heartbeat', { p_session_id: tsId, p_at: nowIso })
-          }
-        } catch (e) {
-          console.error('Timer heartbeat failed:', e)
+        // Safe to send late: the server keeps the newest heartbeat, so a kept one can
+        // never move last-seen backwards.
+        let sent = false
+        if (navigator.onLine) {
+          try {
+            const { error } = await supabase.rpc('desktop_timer_heartbeat', { p_session_id: tsId, p_at: nowIso })
+            sent = !error
+          } catch { /* kept below */ }
         }
+        if (!sent) await queueRecord('timer_heartbeat', { session_id: tsId, at: nowIso })
       }
 
       try {
@@ -1026,17 +1120,20 @@ function isAlreadyExists(err: unknown): boolean {
             let totalOffline = 0
             gaps.forEach((g: any) => totalOffline += g.durationMinutes)
             
-            // Mark session as needing review
+            // Mark the session for review. getSleepGaps() hands each gap over only once,
+            // so a gap not recorded now is gone for good: keep it on this device when
+            // offline or when the update fails.
+            const gapFlag = { session_id: activeSession.id, review_reason: 'Possible sleep/offline gap detected', offline_minutes: totalOffline }
+            let flagged = false
             if (navigator.onLine) {
-              await supabase.from('attendance_sessions').update({
+              const { error: flagError } = await supabase.from('attendance_sessions').update({
                 needs_review: true,
-                review_reason: 'Possible sleep/offline gap detected',
-                offline_minutes: totalOffline
+                review_reason: gapFlag.review_reason,
+                offline_minutes: gapFlag.offline_minutes
               }).eq('id', activeSession.id)
-            } else {
-              // We could enqueue this update, but simply letting it be handled offline is tricky.
-              // We'll queue a custom item or just let the offline missing heartbeat flag it.
+              flagged = !flagError
             }
+            if (!flagged) await queueRecord('attendance_flag', gapFlag)
           }
         }
 
@@ -1195,8 +1292,14 @@ function isAlreadyExists(err: unknown): boolean {
         .from('screenshots')
         .insert(metadata)
 
-      if (dbError) {
-        if (dbError.code !== '23505') console.error('Screenshot metadata insert failed:', dbError)
+      if (dbError && dbError.code !== '23505') {
+        // The image is up but its row isn't, and nothing used to retry that: the file
+        // just sat in storage with no record. Keep the image on this device and queue
+        // it; the retry finds the file already uploaded and writes the row.
+        console.error('Screenshot metadata insert failed, kept on this device:', dbError)
+        const saveRes = await window.electronAPI?.saveTempScreenshot(captureResult.buffer)
+        if (saveRes?.success) await queueRecord('screenshot', metadata, { file_path: saveRes.filePath })
+        return
       }
 
       console.log('Screenshot successfully uploaded and registered in database:', storagePath)
@@ -1253,19 +1356,14 @@ function isAlreadyExists(err: unknown): boolean {
           if (tsId && idleMinutesRef.current >= TIMER_IDLE_FLAG_MINUTES && !timerIdleFlaggedRef.current && !activeBreakRef.current) {
             timerIdleFlaggedRef.current = true
             const reason = `Idle ${idleMinutesRef.current}m during active timer — verify work time`
-            try {
-              if (!navigator.onLine && window.electronAPI) {
-                await window.electronAPI.enqueueSyncItem({
-                  type: 'timer_flag',
-                  payload_json: { session_id: tsId, reason },
-                  idempotency_key: crypto.randomUUID()
-                })
-              } else {
-                await supabase.rpc('desktop_timer_flag', { p_session_id: tsId, p_reason: reason })
-              }
-            } catch (e) {
-              console.error('Timer idle flag failed:', e)
+            let flagSent = false
+            if (navigator.onLine) {
+              try {
+                const { error } = await supabase.rpc('desktop_timer_flag', { p_session_id: tsId, p_reason: reason })
+                flagSent = !error
+              } catch { /* kept below */ }
             }
+            if (!flagSent) await queueRecord('timer_flag', { session_id: tsId, reason })
           }
 
           // Auto clock-out after 1h of no input — capped at when activity stopped,
@@ -1277,7 +1375,7 @@ function isAlreadyExists(err: unknown): boolean {
             try {
               // Stop any running task timer first (consistent with manual clock-out).
               if (tsId) {
-                try { await supabase.rpc('desktop_timer_stop', { p_session_id: tsId, p_end_time: new Date(Date.now() - idleMinutesRef.current * 60000).toISOString() }) } catch {}
+                await stopTimerOrQueue(tsId, new Date(Date.now() - idleMinutesRef.current * 60000).toISOString())
                 activeTimeSessionIdRef.current = null
               }
               const { data: res } = await supabase.rpc('desktop_idle_clock_out', {
@@ -1821,40 +1919,44 @@ function isAlreadyExists(err: unknown): boolean {
           </div>
         )}
 
-        {(queueStats.pendingCount > 0 || queueStats.failedCount > 0 || !isOnline) && (
-          <div className="mt-4 px-3.5 py-3 rounded-xl bg-[#FAFAFA] border border-[#EAEAEA] text-[12px] text-[#525252] flex items-center justify-between">
-            <span className="flex items-center gap-2">
-              <RefreshCw className={`h-3.5 w-3.5 ${
-                !isOnline ? 'text-[#B4B4B4]'
-                : queueStats.pendingCount > 0 ? 'text-[#0A0A0A] animate-spin'
-                : queueStats.failedCount > 0 ? 'text-[#E8890C]'
-                : 'text-[#0FA968]'}`} />
-              {!isOnline
-                ? 'Offline — saved on this device'
-                : queueStats.pendingCount > 0
-                  ? `Syncing ${queueStats.pendingCount}…`
-                  : queueStats.failedCount > 0
-                    ? `${queueStats.failedCount} ${queueStats.failedCount === 1 ? 'record' : 'records'} didn't reach the server`
-                    : 'Synced'}
-            </span>
-            {queueStats.failedCount > 0 && isOnline && (
-              <button onClick={async () => { if (window.electronAPI) { await window.electronAPI.forceSyncRetry(); startSyncManager() } }}
-                className="font-semibold text-[#0A0A0A] underline">Retry {queueStats.failedCount}</button>
-            )}
-          </div>
-        )}
-
-        {/* Why they're stuck — otherwise the count is a dead end for the person
-            looking at it and undiagnosable for us. */}
-        {queueStats.failedCount > 0 && isOnline && (queueStats.failedDetail?.length ?? 0) > 0 && (
-          <div className="mt-2 px-3.5 py-2.5 rounded-xl bg-[#FFFBF4] border border-[#F6E4C8] text-[11px] text-[#92400E] space-y-1">
-            {queueStats.failedDetail!.map((f, i) => (
-              <div key={i} className="break-words">
-                <b className="font-semibold">{f.type}</b> · after {f.retries} tries — {f.error}
+        {(queueStats.pendingCount > 0 || queueStats.quarantinedCount > 0 || !isOnline) && (() => {
+          const n = queueStats.pendingCount
+          const q = queueStats.quarantinedCount
+          const waitMs = queueStats.nextAttemptAt ? new Date(queueStats.nextAttemptAt).getTime() - Date.now() : 0
+          const nextTry = waitMs > 90000 ? ` · next try in ${Math.round(waitMs / 60000)}m` : ''
+          const records = (k: number) => `${k} ${k === 1 ? 'record' : 'records'}`
+          const label = !isOnline
+            ? (n > 0 ? `Offline · ${records(n)} saved on this device` : 'Offline · saving on this device')
+            : n > 0
+              ? (syncInFlight ? `Sending ${records(n)}…` : `${records(n)} waiting to send${nextTry}`)
+              : q > 0 ? 'Everything else is synced' : 'Synced'
+          return (
+            <div className="mt-4 px-3.5 py-3 rounded-xl bg-[#FAFAFA] border border-[#EAEAEA] text-[12px] text-[#525252] space-y-2">
+              <div className="flex items-center gap-2">
+                <RefreshCw className={`h-3.5 w-3.5 shrink-0 ${
+                  !isOnline ? 'text-[#B4B4B4]'
+                  : syncInFlight ? 'text-[#0A0A0A] animate-spin'
+                  : n > 0 ? 'text-[#0A0A0A]'
+                  : 'text-[#0FA968]'}`} />
+                <span>{label}</span>
               </div>
-            ))}
-          </div>
-        )}
+              {/* Records the server won't accept yet. Kept, never deleted, retried
+                  every few hours, with the reason, so the person isn't left with a
+                  count they can't act on and it can be diagnosed remotely. */}
+              {q > 0 && (
+                <div className="text-[11px] text-[#92400E] bg-[#FFFBF4] border border-[#F6E4C8] rounded-lg px-2.5 py-2 space-y-1">
+                  <div className="font-semibold">
+                    {records(q)} kept on this device · the server can&apos;t accept {q === 1 ? 'it' : 'them'} yet
+                  </div>
+                  {queueStats.quarantinedDetail.map((f, i) => (
+                    <div key={i} className="break-words"><b className="font-semibold">{f.type}</b> · {f.error}</div>
+                  ))}
+                  <div className="text-[#B45309]">Nothing is deleted. vTrack tries again every few hours.</div>
+                </div>
+              )}
+            </div>
+          )
+        })()}
 
         <div className="h-4 shrink-0" />
       </div>

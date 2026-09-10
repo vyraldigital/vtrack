@@ -293,6 +293,16 @@ if (!gotTheLock) {
   queueDb = new Datastore({ filename: dbPath, autoload: true });
   queueDb.ensureIndex({ fieldName: 'status' });
   queueDb.ensureIndex({ fieldName: 'created_at' });
+  queueDb.ensureIndex({ fieldName: 'next_attempt_at' });
+  // Every retry rewrites a record and NeDB appends each write to its file, so
+  // compact periodically; otherwise a long outage keeps growing the queue file.
+  queueDb.setAutocompactionInterval(10 * 60 * 1000);
+  // Older builds parked records as 'failed' after 5 quick tries and waited for a
+  // Retry button. Put them back in the queue, due now.
+  queueDb.update({ status: 'failed' }, { $set: { status: 'pending', next_attempt_at: null, retry_count: 0 } }, { multi: true }, (err, n) => {
+    if (err) console.error('[queue] could not re-queue parked records:', err);
+    else if (n) console.log(`[queue] re-queued ${n} record(s) parked by an older build`);
+  });
 
   createWindow();
   setupAutoUpdater(mainWindow);
@@ -577,7 +587,11 @@ ipcMain.handle('enqueue-sync-item', async (event, item) => {
       created_at: item.created_at || new Date().toISOString(),
       retry_count: 0,
       last_attempt_at: null,
-      status: 'pending', // pending, failed
+      // pending: waiting to send, retried forever on a growing delay
+      // quarantined: the server rejected it; kept (never deleted), retried every few hours
+      status: 'pending',
+      next_attempt_at: null,
+      quarantined_at: null,
       error_message: null,
       idempotency_key: item.idempotency_key || crypto.randomUUID()
     };
@@ -590,8 +604,14 @@ ipcMain.handle('enqueue-sync-item', async (event, item) => {
 
 ipcMain.handle('get-sync-queue', async () => {
   return new Promise((resolve, reject) => {
-    // Return all pending or failed items, sorted by oldest first
-    queueDb.find({ status: { $in: ['pending', 'failed'] } }).sort({ created_at: 1 }).exec((err, docs) => {
+    // Records due now, oldest first. Anything still waiting out a retry delay is
+    // left for a later pass. Capped per pass so the status line stays current
+    // while a long backlog drains.
+    const now = new Date().toISOString();
+    queueDb.find({
+      status: { $in: ['pending', 'failed', 'quarantined'] },
+      $or: [{ next_attempt_at: null }, { next_attempt_at: { $exists: false } }, { next_attempt_at: { $lte: now } }],
+    }).sort({ created_at: 1 }).limit(100).exec((err, docs) => {
       if (err) return reject(err);
       resolve(docs);
     });
@@ -631,25 +651,47 @@ ipcMain.handle('get-queue-stats', async () => {
   return new Promise((resolve, reject) => {
     queueDb.find({}, (err, docs) => {
       if (err) return reject(err);
-      const pendingCount = docs.filter(d => d.status === 'pending').length;
-      const failed = docs.filter(d => d.status === 'failed');
-      // Carry the reason back to the UI. Without it a stuck item is invisible —
-      // the person sees a count they can't act on and we can't diagnose remotely.
-      const failedDetail = failed.slice(0, 5).map(d => ({
-        type: d.type,
-        error: (d.error_message || 'Unknown error').slice(0, 300),
-        retries: d.retry_count || 0,
-      }));
-      resolve({ pendingCount, failedCount: failed.length, failedDetail });
+      const now = new Date().toISOString();
+      const pending = docs.filter(d => d.status === 'pending' || d.status === 'failed');
+      const quarantined = docs.filter(d => d.status === 'quarantined');
+      const dueNow = pending.some(d => !d.next_attempt_at || d.next_attempt_at <= now);
+      const upcoming = pending.map(d => d.next_attempt_at).filter(t => t && t > now).sort();
+      const oldest = pending.map(d => d.created_at).filter(Boolean).sort();
+      resolve({
+        pendingCount: pending.length,
+        quarantinedCount: quarantined.length,
+        // null while something is due right now; otherwise the soonest scheduled try
+        nextAttemptAt: dueNow ? null : (upcoming[0] || null),
+        oldestPendingAt: oldest[0] || null,
+        // Why the server won't accept a record: shown to the person, and the only way
+        // to diagnose it without their machine.
+        quarantinedDetail: quarantined.slice(0, 5).map(d => ({
+          type: d.type,
+          error: (d.error_message || 'Unknown error').slice(0, 300),
+          since: d.quarantined_at || null,
+        })),
+      });
     });
   });
 });
 
 ipcMain.handle('force-sync-retry', async () => {
   return new Promise((resolve, reject) => {
-    queueDb.update({ status: 'failed' }, { $set: { status: 'pending', retry_count: 0 } }, { multi: true }, (err, numReplaced) => {
-      if (err) return reject(err);
-      resolve(numReplaced);
-    });
+    // Make every kept record due now: on launch (so a fix shipped in an update heals
+    // stuck records by itself), on reconnect, and before starting a break. Waiting
+    // records restart their delay ramp; rejected ones stay quarantined and, if still
+    // rejected, go straight back to waiting hours.
+    queueDb.update(
+      { status: { $in: ['pending', 'failed'] } },
+      { $set: { status: 'pending', next_attempt_at: null, retry_count: 0 } },
+      { multi: true },
+      (err, waiting) => {
+        if (err) return reject(err);
+        queueDb.update({ status: 'quarantined' }, { $set: { next_attempt_at: null } }, { multi: true }, (err2, rejected) => {
+          if (err2) return reject(err2);
+          resolve(waiting + rejected);
+        });
+      }
+    );
   });
 });
