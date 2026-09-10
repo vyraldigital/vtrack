@@ -131,6 +131,14 @@ export default function App() {
 // 183px (radius 99, stroke 15); the digit row crosses it near the middle, where the
 // chord is ~176px. 156 leaves ~10px of air each side.
 const TIMER_MAX_W = 156
+
+// Storage answers a second upload of the same path with "already exists": HTTP 409
+// on current storage, or statusCode "409" in the body on older versions. For a
+// screenshot it means an earlier attempt already got the file up.
+function isAlreadyExists(err: unknown): boolean {
+  const e = err as { status?: number; statusCode?: string | number; message?: string } | null
+  return e?.status === 409 || String(e?.statusCode) === '409' || /already exists|duplicate/i.test(e?.message ?? '')
+}
   const [activeBreak, setActiveBreak] = useState<{ id: string; started_at: string } | null>(null)
   const [breakStr, setBreakStr] = useState('0:00')
   const [breakNudged, setBreakNudged] = useState(false)
@@ -241,8 +249,14 @@ const TIMER_MAX_W = 156
     window.addEventListener('online', handleOnline)
     window.addEventListener('offline', handleOffline)
     
-    // Also start sync manager on mount
-    startSyncManager()
+    // Start the sync manager on mount, but first give anything that failed under an
+    // earlier build a fresh set of retries. A fix shipped in an update should heal
+    // stuck records by itself, not wait for someone to press Retry. Bounded:
+    // anything still failing uses its 5 attempts and parks again.
+    ;(async () => {
+      try { await window.electronAPI?.forceSyncRetry() } catch { /* best-effort */ }
+      startSyncManager()
+    })()
 
     return () => {
       window.removeEventListener('online', handleOnline)
@@ -294,8 +308,14 @@ const TIMER_MAX_W = 156
                 throw new Error(readResult.error || 'Failed to read local screenshot')
               }
               
-              const { error: uploadError } = await supabase.storage.from('desktop-screenshots').upload(item.payload_json.storage_path, readResult.buffer, { contentType: 'image/jpeg', upsert: true })
-              if (uploadError) throw uploadError
+              // Never upsert. An earlier attempt may have uploaded this file and then
+              // failed before its row was written. Retrying with upsert means
+              // OVERWRITING, which the bucket rightly refuses (nobody should be able to
+              // replace their own monitoring screenshots), so the retry failed RLS
+              // forever and hid the original error. If the file is already there, the
+              // upload step is done: go write the row.
+              const { error: uploadError } = await supabase.storage.from('desktop-screenshots').upload(item.payload_json.storage_path, readResult.buffer, { contentType: 'image/jpeg', upsert: false })
+              if (uploadError && !isAlreadyExists(uploadError)) throw uploadError
               
               const { error: dbError } = await supabase.from('screenshots').insert(item.payload_json)
               if (dbError) {
@@ -1144,14 +1164,16 @@ const TIMER_MAX_W = 156
         return
       }
 
+      // upsert: false for the same reason as the queued retry: overwriting needs a
+      // permission the bucket deliberately doesn't grant.
       const { error: uploadError } = await supabase.storage
         .from('desktop-screenshots')
         .upload(storagePath, captureResult.buffer, {
           contentType: 'image/jpeg',
-          upsert: true
+          upsert: false
         })
 
-      if (uploadError) {
+      if (uploadError && !isAlreadyExists(uploadError)) {
         // Fallback to queue if upload fails despite being online
         if (window.electronAPI) {
           const saveRes = await window.electronAPI.saveTempScreenshot(captureResult.buffer)
