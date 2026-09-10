@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { supabase } from './supabase'
 import { Fingerprint, LogOut, AlertTriangle, Clock, RefreshCw } from 'lucide-react'
 
@@ -127,6 +127,10 @@ export default function App() {
   const BREAK_NUDGE_MINUTES = 50
   const BREAK_LIMIT_MINUTES = 60
   const BREAK_CREDIT_MINUTES = 30
+// Widest the dial's big number may render. The tick ring's clear inner diameter is
+// 183px (radius 99, stroke 15); the digit row crosses it near the middle, where the
+// chord is ~176px. 156 leaves ~10px of air each side.
+const TIMER_MAX_W = 156
   const [activeBreak, setActiveBreak] = useState<{ id: string; started_at: string } | null>(null)
   const [breakStr, setBreakStr] = useState('0:00')
   const [breakNudged, setBreakNudged] = useState(false)
@@ -139,6 +143,29 @@ export default function App() {
   // elapsed and instantly auto-end the break — we've already seen a PC 9 hours out.
   // So once a break starts we measure from a LOCAL anchor and ignore the skew.
   const breakAnchorRef = useRef<{ id: string; localStart: number } | null>(null)
+
+  // The dial number must never touch the tick ring — whatever font actually loads.
+  // The design assumed a thin weight-250 face, but Inter is fetched from Google
+  // Fonts at 400–700 only, and offline it falls through to Segoe UI; both render
+  // "00:00:00" wider than the ring allows. So measure the real rendered width and
+  // scale down to fit. A transform doesn't change layout width, so the
+  // measurement can't feed back into itself; the observer re-fits on mount, when
+  // the string's length changes, and when a late-loading font swaps in.
+  const [timerScale, setTimerScale] = useState(1)
+  const timerObserverRef = useRef<ResizeObserver | null>(null)
+  const timerFitRef = useCallback((el: HTMLDivElement | null) => {
+    timerObserverRef.current?.disconnect()
+    timerObserverRef.current = null
+    if (!el) return
+    const fit = () => {
+      const w = el.scrollWidth
+      setTimerScale(w > TIMER_MAX_W ? TIMER_MAX_W / w : 1)
+    }
+    fit()
+    const ro = new ResizeObserver(fit)
+    ro.observe(el)
+    timerObserverRef.current = ro
+  }, [])
   const breakLimitHandledRef = useRef<boolean>(false)
 
   const activeSessionRef = useRef<any>(null)
@@ -1632,7 +1659,9 @@ export default function App() {
             <div className={`text-[9.5px] font-semibold tracking-[.16em] uppercase mb-1.5 ${onBreak ? 'text-[#E8890C]' : 'text-[#B4B4B4]'}`}>
               {onBreak ? (breakNudged ? 'Still on break?' : 'On a break') : isClockedIn ? 'Elapsed' : 'Not started'}
             </div>
-            <div className={`text-[46px] font-[250] tracking-[-.035em] tabular-nums leading-none ${isClockedIn ? 'text-[#0A0A0A]' : 'text-[#B4B4B4]'}`}>
+            <div ref={timerFitRef}
+                 style={timerScale < 1 ? { transform: `scale(${timerScale})` } : undefined}
+                 className={`text-[46px] font-[250] tracking-[-.035em] tabular-nums leading-none whitespace-nowrap ${isClockedIn ? 'text-[#0A0A0A]' : 'text-[#B4B4B4]'}`}>
               {onBreak ? breakStr : timerStr}
             </div>
             <div className="text-[11.5px] text-[#8A8A8A] tabular-nums mt-2.5">
