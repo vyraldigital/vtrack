@@ -6,7 +6,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getDeviceInfo: () => ipcRenderer.invoke('get-device-info'),
   getPermissionsStatus: () => ipcRenderer.invoke('get-permissions-status'),
   requestSystemPermissions: (type) => ipcRenderer.invoke('request-system-permissions', type),
-  captureScreen: () => ipcRenderer.invoke('capture-screen'),
+  captureScreen: (sessionId) => ipcRenderer.invoke('capture-screen', sessionId),
   saveTempScreenshot: (buffer) => ipcRenderer.invoke('save-temp-screenshot', buffer),
   readTempScreenshot: (filePath) => ipcRenderer.invoke('read-temp-screenshot', filePath),
   setActivityTracking: (enabled) => ipcRenderer.invoke('set-activity-tracking', enabled),

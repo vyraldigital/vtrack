@@ -35,11 +35,32 @@ let queueDb = null;
 // Cap at 10 events/second (one per 100 ms) so the stored value stays human-readable.
 let _lastMouseMove = 0;
 
+// Activity is measured in 10-second windows (owner, 22 Sep 2026): a window with
+// any keyboard or mouse input is 10 active seconds, so a minute with a single
+// nudge counts 10 seconds, not the whole minute. Windows are numbered from the
+// epoch; the set holds the ones that saw input since the last stats read.
+const ACTIVITY_WINDOW_MS = 10000;
+let activeWindows = new Set();
+let statsWindowStart = Date.now();
+// The window in progress at the last read, if it had input: it was counted then,
+// so the next read mustn't count it again.
+let lastCountedWindow = null;
+function markActive() {
+  activeWindows.add(Math.floor(Date.now() / ACTIVITY_WINDOW_MS));
+}
+function resetActivityWindows() {
+  activeWindows = new Set();
+  statsWindowStart = Date.now();
+  lastCountedWindow = null;
+}
+
 // Register uIOhook event listeners once at module load.
 // uIOhook is NOT started here — it starts only when activity tracking is enabled
 // via the set-activity-tracking IPC call (i.e. when the editor clocks in AND has the feature flag on).
 uIOhook.on('keydown', () => {
-  if (isActivityTrackingEnabled) keyboardCount++;
+  if (!isActivityTrackingEnabled) return;
+  keyboardCount++;
+  markActive();
 });
 
 uIOhook.on('mousemove', () => {
@@ -48,12 +69,27 @@ uIOhook.on('mousemove', () => {
     if (now - _lastMouseMove >= 100) {
       mouseCount++;
       _lastMouseMove = now;
+      markActive();
+    }
+  }
+});
+
+// Scrolling a timeline or a page is real input too; it used to count as idle.
+uIOhook.on('wheel', () => {
+  if (isActivityTrackingEnabled) {
+    const now = Date.now();
+    if (now - _lastMouseMove >= 100) {
+      mouseCount++;
+      _lastMouseMove = now;
+      markActive();
     }
   }
 });
 
 uIOhook.on('mousedown', () => {
-  if (isActivityTrackingEnabled) mouseClickCount++;
+  if (!isActivityTrackingEnabled) return;
+  mouseClickCount++;
+  markActive();
 });
 
 // Unique device fingerprint generator (stable across app runs)
@@ -325,10 +361,19 @@ if (!gotTheLock) {
       }
     }
     lastSleepTime = 0;
-    
+
     if (mainWindow) {
       mainWindow.webContents.send('power-state-change', 'resume');
     }
+  });
+
+  // Locking the screen means going on a break (owner, 22 Sep 2026); the renderer
+  // starts one on lock and ends it on unlock.
+  powerMonitor.on('lock-screen', () => {
+    if (mainWindow) mainWindow.webContents.send('power-state-change', 'lock');
+  });
+  powerMonitor.on('unlock-screen', () => {
+    if (mainWindow) mainWindow.webContents.send('power-state-change', 'unlock');
   });
 
   app.on('activate', () => {
@@ -425,7 +470,38 @@ ipcMain.handle('request-system-permissions', (event, type) => {
   return getPermissions();
 });
 
-ipcMain.handle('capture-screen', async () => {
+// How much of the screen changed since the previous screenshot (owner, 22 Sep
+// 2026). Each capture is shrunk to 64×36 grey levels here on the computer and
+// compared with the last one; only the resulting percentage leaves the machine.
+// Quiet time with a moving screen (footage, a render) then reads differently from
+// a frozen one. Context for a reviewer only — it never changes hours.
+const SAMPLE_W = 64;
+const SAMPLE_H = 36;
+// Grey-level difference that counts as a changed pixel; below it is noise.
+const PIXEL_CHANGE_LEVEL = 20;
+let lastScreenSample = null;
+let lastSampleSession = null;
+
+function screenSample(image) {
+  const small = image.resize({ width: SAMPLE_W, height: SAMPLE_H, quality: 'good' });
+  const { width, height } = small.getSize();
+  const bgra = small.toBitmap();
+  const grey = new Uint8Array(width * height);
+  for (let i = 0; i < grey.length; i++) {
+    const b = bgra[i * 4], g = bgra[i * 4 + 1], r = bgra[i * 4 + 2];
+    grey[i] = (r * 299 + g * 587 + b * 114) / 1000;
+  }
+  return grey;
+}
+
+function changedPct(prev, next) {
+  if (!prev || !next || prev.length !== next.length || next.length === 0) return null;
+  let changed = 0;
+  for (let i = 0; i < next.length; i++) if (Math.abs(next[i] - prev[i]) > PIXEL_CHANGE_LEVEL) changed++;
+  return Math.round((changed * 100) / next.length);
+}
+
+ipcMain.handle('capture-screen', async (event, sessionId) => {
   try {
     const { desktopCapturer } = require('electron');
     let sources = await desktopCapturer.getSources({
@@ -457,9 +533,22 @@ ipcMain.handle('capture-screen', async () => {
     const resized = thumbnail.resize({ width, height, quality: 'good' });
     const jpegBuffer = resized.toJPEG(70); // JPEG quality ~70%
 
+    // Compared only within one attendance session: the first capture of a session
+    // has nothing meaningful before it.
+    let changePct = null;
+    try {
+      const sample = screenSample(thumbnail);
+      if (sessionId && sessionId === lastSampleSession) changePct = changedPct(lastScreenSample, sample);
+      lastScreenSample = sample;
+      lastSampleSession = sessionId || null;
+    } catch (e) {
+      console.warn('Screen change sample failed:', e);
+    }
+
     return {
       success: true,
-      buffer: jpegBuffer
+      buffer: jpegBuffer,
+      changePct
     };
   } catch (error) {
     console.error('Failed to capture screen:', error);
@@ -505,6 +594,7 @@ ipcMain.handle('set-activity-tracking', (event, enabled) => {
   isActivityTrackingEnabled = enabled;
 
   if (enabled && !uiohookRunning) {
+    resetActivityWindows();
     try {
       uIOhook.start();
       uiohookRunning = true;
@@ -526,6 +616,7 @@ ipcMain.handle('set-activity-tracking', (event, enabled) => {
     keyboardCount = 0;
     mouseCount = 0;
     mouseClickCount = 0;
+    resetActivityWindows();
   }
 
   return true;
@@ -533,18 +624,29 @@ ipcMain.handle('set-activity-tracking', (event, enabled) => {
 
 // IPC Handler: Get Activity Stats
 ipcMain.handle('get-activity-stats', async () => {
+  const now = Date.now();
+  let windows = activeWindows.size;
+  if (lastCountedWindow !== null && activeWindows.has(lastCountedWindow)) windows--;
+  const current = Math.floor(now / ACTIVITY_WINDOW_MS);
   const stats = {
     keyboardCount,
     mouseCount,
     mouseClickCount,
+    // The stretch these numbers cover, and how many 10-second windows in it had input.
+    windowStart: statsWindowStart,
+    windowEnd: now,
+    activeWindows: windows,
     activeApp: null,
     activeWindowTitle: null
   };
-  
+
   // Reset counters immediately
   keyboardCount = 0;
   mouseCount = 0;
   mouseClickCount = 0;
+  lastCountedWindow = activeWindows.has(current) ? current : null;
+  activeWindows = new Set(lastCountedWindow !== null ? [lastCountedWindow] : []);
+  statsWindowStart = now;
 
   if (isActivityTrackingEnabled) {
     try {

@@ -13,10 +13,12 @@ export interface ElectronAPI {
     screen: 'unknown' | 'granted' | 'denied' | 'limited';
     accessibility: 'unknown' | 'granted' | 'denied' | 'limited';
   }>;
-  captureScreen: () => Promise<{
+  captureScreen: (sessionId?: string) => Promise<{
     success: boolean;
     buffer?: Uint8Array;
     error?: string;
+    /** % of the screen changed since the previous capture in the same session. */
+    changePct?: number | null;
   }>;
   saveTempScreenshot: (buffer: Uint8Array) => Promise<{
     success: boolean;
@@ -33,6 +35,11 @@ export interface ElectronAPI {
     keyboardCount: number;
     mouseCount: number;
     mouseClickCount: number;
+    /** Epoch ms: the stretch these counts cover. */
+    windowStart: number;
+    windowEnd: number;
+    /** 10-second windows in that stretch that saw any input. */
+    activeWindows: number;
     activeApp: string | null;
     activeWindowTitle: string | null;
   }>;
@@ -50,7 +57,7 @@ export interface ElectronAPI {
     quarantinedDetail: { type: string; error: string; since: string | null }[]
   }>;
   forceSyncRetry: () => Promise<number>;
-  onPowerStateChange: (callback: (state: 'suspend' | 'resume') => void) => () => void;
+  onPowerStateChange: (callback: (state: 'suspend' | 'resume' | 'lock' | 'unlock') => void) => () => void;
   getAppVersion: () => Promise<string>;
   checkForUpdates: () => Promise<{ success: boolean; version?: string; error?: string }>;
   onUpdaterStatus: (callback: (text: string) => void) => () => void;

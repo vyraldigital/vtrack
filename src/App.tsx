@@ -167,6 +167,19 @@ export default function App() {
   const BREAK_NUDGE_MINUTES = 50
   const BREAK_LIMIT_MINUTES = 60
   const BREAK_CREDIT_MINUTES = 30
+// Every break is paid and follows the same 50/60-minute rules; the kind only says
+// what it was. 'screen_lock' starts itself when the screen locks — locking means
+// going on a break (owner, 22 Sep 2026) — and ends on unlock.
+type BreakKind = 'regular' | 'friday_main' | 'screen_lock'
+type OpenBreak = { id: string; started_at: string; kind?: BreakKind }
+const BREAK_TITLE: Record<BreakKind, string> = {
+  regular: 'On a break',
+  friday_main: 'Friday break',
+  screen_lock: 'Screen locked',
+}
+// Friday on this computer's clock (the team's machines run on Karachi time).
+const isFriday = () => new Date().getDay() === 5
+
 // Widest the dial's big number may render. The tick ring's clear inner diameter is
 // 183px (radius 99, stroke 15); the digit row crosses it near the middle, where the
 // chord is ~176px. 156 leaves ~10px of air each side.
@@ -179,12 +192,16 @@ function isAlreadyExists(err: unknown): boolean {
   const e = err as { status?: number; statusCode?: string | number; message?: string } | null
   return e?.status === 409 || String(e?.statusCode) === '409' || /already exists|duplicate/i.test(e?.message ?? '')
 }
-  const [activeBreak, setActiveBreak] = useState<{ id: string; started_at: string } | null>(null)
+  const [activeBreak, setActiveBreak] = useState<OpenBreak | null>(null)
   const [breakStr, setBreakStr] = useState('0:00')
   const [breakNudged, setBreakNudged] = useState(false)
   const [breakBusy, setBreakBusy] = useState(false)
   const [breaksToday, setBreaksToday] = useState<{ count: number; minutes: number }>({ count: 0, minutes: 0 })
-  const activeBreakRef = useRef<{ id: string; started_at: string } | null>(null)
+  const activeBreakRef = useRef<OpenBreak | null>(null)
+  // A break the screen lock is starting right now: an unlock that arrives before
+  // the server answers waits for it, then ends it.
+  const lockBreakRef = useRef<Promise<void> | null>(null)
+  const lockHandlerRef = useRef<((state: 'lock' | 'unlock') => void) | null>(null)
   // started_at comes from the SERVER clock; Date.now() is this machine's. Even a
   // second of drift (or the RPC round trip) made the timer render "-1:-1" on the
   // first tick of every break. Worse, a machine running FAST would compute a huge
@@ -246,12 +263,16 @@ function isAlreadyExists(err: unknown): boolean {
       window.electronAPI.getDeviceInfo().then(setDeviceInfo)
       window.electronAPI.getPermissionsStatus().then(setPermissions)
 
-      // Listen for system wake/resume
+      // Listen for system wake/resume, and screen lock/unlock
       window.electronAPI.onPowerStateChange((state) => {
         if (state === 'resume') {
           console.log('System resumed from sleep, refreshing state...')
           checkActiveSession()
           refreshPermissions()
+        } else if (state === 'lock' || state === 'unlock') {
+          // Through a ref: this listener is registered once, and would otherwise
+          // see the state from the first render forever.
+          lockHandlerRef.current?.(state)
         }
       })
     }
@@ -406,7 +427,18 @@ function isAlreadyExists(err: unknown): boolean {
               })
               if (error) throw error
               success = true
+            } else if (item.type === 'sleep_gap') {
+              // Recording the same sleep twice counts it once (server-side), so a
+              // retry after a lost reply is harmless.
+              const { error } = await supabase.rpc('desktop_record_sleep_gap', {
+                p_session_id: item.payload_json.session_id,
+                p_started_at: item.payload_json.started_at,
+                p_ended_at: item.payload_json.ended_at
+              })
+              if (error) throw error
+              success = true
             } else if (item.type === 'attendance_flag') {
+              // Kept for sleep flags queued by builds before sleep_gap.
               const { error } = await supabase.from('attendance_sessions').update({
                 needs_review: true,
                 review_reason: item.payload_json.review_reason,
@@ -475,6 +507,12 @@ function isAlreadyExists(err: unknown): boolean {
   }
 
   // 2. Clock timer and tasks poll when session status changes
+  // Keyed on the session's id and status, not the object. vTrack re-reads the
+  // session every time its window comes back into view (the auth library
+  // announces a sign-in on each focus), and each re-read used to restart every
+  // loop — including the 5–10 minute screenshot countdown, which then never ran
+  // out. Measured 7 Sep 2026: one editor's loops restarted 90 times in a day and
+  // she got 34 screenshots in 8 hours instead of about 65.
   useEffect(() => {
     if (activeSession && activeSession.status === 'active') {
       startClockTimer()
@@ -485,7 +523,8 @@ function isAlreadyExists(err: unknown): boolean {
     } else {
       stopAllTrackers()
     }
-  }, [activeSession])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSession?.id, activeSession?.status])
 
   const loadProfile = async (userId: string) => {
     try {
@@ -735,8 +774,10 @@ function isAlreadyExists(err: unknown): boolean {
     } catch { /* table may not exist yet — breaks are a bonus signal */ }
   }
 
-  const startBreak = async () => {
-    if (!activeSession || activeBreakRef.current) return
+  // startedAt: when the screen locked, for a break the lock started. quiet: no
+  // error message — nobody pressed a button, so there's nobody to tell.
+  const startBreak = async (kind: BreakKind = 'regular', startedAt?: number, quiet = false) => {
+    if (!activeSessionRef.current || activeBreakRef.current) return
     setBreakBusy(true)
     try {
       // Send any break end still waiting on this device first. Starting a break
@@ -744,22 +785,26 @@ function isAlreadyExists(err: unknown): boolean {
       // make this new break quietly continue the old one.
       try { await window.electronAPI?.forceSyncRetry() } catch { /* best-effort */ }
       await runSyncRef.current?.()
-      const { data, error } = await supabase.rpc('desktop_break_start')
+      const { data, error } = await supabase.rpc('desktop_break_start', {
+        p_kind: kind,
+        p_started_at: startedAt ? new Date(startedAt).toISOString() : null,
+      })
       if (error) throw error
-      const brk = data as { id: string; started_at: string }
+      const brk = data as OpenBreak
       if (endedBreakIdsRef.current.has(brk.id)) {
-        setSyncError('Still sending the end of your last break. Try again in a moment.')
+        if (!quiet) setSyncError('Still sending the end of your last break. Try again in a moment.')
         return
       }
       setActiveBreak(brk); activeBreakRef.current = brk
-      breakAnchorRef.current = { id: brk.id, localStart: Date.now() }
+      breakAnchorRef.current = { id: brk.id, localStart: startedAt ?? Date.now() }
       setBreakNudged(false); breakLimitHandledRef.current = false
     } catch (e: any) {
-      setSyncError(e?.message || 'Could not start the break. Please try again.')
+      if (!quiet) setSyncError(e?.message || 'Could not start the break. Please try again.')
+      else console.error('Could not start a break on screen lock:', e)
     } finally { setBreakBusy(false) }
   }
 
-  const endBreak = async (reason: 'manual' | 'auto_60m' | 'clock_out' = 'manual') => {
+  const endBreak = async (reason: 'manual' | 'auto_60m' | 'clock_out' | 'unlock' = 'manual') => {
     const brk = activeBreakRef.current
     if (!brk) return
     setBreakBusy(true)
@@ -786,6 +831,22 @@ function isAlreadyExists(err: unknown): boolean {
       refreshBreaksToday()
     }
   }
+
+  // Locking the screen while clocked in starts a break at the moment of locking;
+  // unlocking ends it. A break already running (a Friday or a regular one) is left
+  // alone, and unlocking doesn't end it — only a lock's own break ends on unlock.
+  const handleLockChange = async (state: 'lock' | 'unlock') => {
+    if (state === 'lock') {
+      if (!activeSessionRef.current || activeBreakRef.current) return
+      const starting = startBreak('screen_lock', Date.now(), true)
+      lockBreakRef.current = starting
+      try { await starting } finally { if (lockBreakRef.current === starting) lockBreakRef.current = null }
+      return
+    }
+    if (lockBreakRef.current) await lockBreakRef.current
+    if (activeBreakRef.current?.kind === 'screen_lock') await endBreak('unlock')
+  }
+  useEffect(() => { lockHandlerRef.current = (state) => { void handleLockChange(state) } })
 
   // Fired once when a break reaches BREAK_LIMIT_MINUTES.
   const handleBreakLimit = async () => {
@@ -858,12 +919,12 @@ function isAlreadyExists(err: unknown): boolean {
         await runSyncRef.current?.()
         const { data } = await supabase
           .from('work_breaks')
-          .select('id, started_at')
+          .select('id, started_at, kind')
           .eq('user_id', uid)
           .is('ended_at', null)
           .order('started_at', { ascending: false })
           .limit(1)
-        const open = data?.[0] as { id: string; started_at: string } | undefined
+        const open = data?.[0] as OpenBreak | undefined
         if (!cancelled && open && activeSessionRef.current && !endedBreakIdsRef.current.has(open.id)) {
           setActiveBreak(open); activeBreakRef.current = open
         }
@@ -988,11 +1049,14 @@ function isAlreadyExists(err: unknown): boolean {
 
     try {
       if (action === 'continue') {
+        // After more than an hour with no activity the server ends the old session
+        // at the last activity and hands back a new one starting now.
         const { data: sess, error } = await supabase.rpc('desktop_resolve_stale_continue', {
           p_session_id: recoverySession.id
         })
         if (error) throw error
         setActiveSession(sess)
+        await fetchTodaySessions()
       } else if (action === 'lastseen') {
         const { error } = await supabase.rpc('desktop_resolve_stale_clockout_last_seen', {
           p_session_id: recoverySession.id
@@ -1113,27 +1177,26 @@ function isAlreadyExists(err: unknown): boolean {
       try {
         const currentPermissions = await refreshPermissions()
 
-        // Phase 4D: Process sleep gaps
+        // Sleeps go to the server one at a time, with their times. The server keeps
+        // only the part inside this session: a sleep while clocked out used to be
+        // handed to whichever session opened next and flag it — 42 of 47 sleep
+        // flags in 1–21 Sep 2026. Each sleep adds to the session's total instead
+        // of overwriting it. getSleepGaps() hands each gap over only once, so one
+        // not recorded now is kept on this device until it lands.
         if (window.electronAPI) {
           const gaps = await window.electronAPI.getSleepGaps()
-          if (gaps && gaps.length > 0) {
-            let totalOffline = 0
-            gaps.forEach((g: any) => totalOffline += g.durationMinutes)
-            
-            // Mark the session for review. getSleepGaps() hands each gap over only once,
-            // so a gap not recorded now is gone for good: keep it on this device when
-            // offline or when the update fails.
-            const gapFlag = { session_id: activeSession.id, review_reason: 'Possible sleep/offline gap detected', offline_minutes: totalOffline }
-            let flagged = false
+          for (const g of gaps ?? []) {
+            const gap = { session_id: activeSession.id, started_at: new Date(g.start).toISOString(), ended_at: new Date(g.end).toISOString() }
+            let recorded = false
             if (navigator.onLine) {
-              const { error: flagError } = await supabase.from('attendance_sessions').update({
-                needs_review: true,
-                review_reason: gapFlag.review_reason,
-                offline_minutes: gapFlag.offline_minutes
-              }).eq('id', activeSession.id)
-              flagged = !flagError
+              try {
+                const { error: gapError } = await supabase.rpc('desktop_record_sleep_gap', {
+                  p_session_id: gap.session_id, p_started_at: gap.started_at, p_ended_at: gap.ended_at,
+                })
+                recorded = !gapError
+              } catch { /* kept below */ }
             }
-            if (!flagged) await queueRecord('attendance_flag', gapFlag)
+            if (!recorded) await queueRecord('sleep_gap', gap)
           }
         }
 
@@ -1227,7 +1290,7 @@ function isAlreadyExists(err: unknown): boolean {
         return
       }
 
-      const captureResult = await window.electronAPI.captureScreen()
+      const captureResult = await window.electronAPI.captureScreen(currActiveSession.id)
       if (!captureResult.success || !captureResult.buffer) {
         console.warn('Screen capture returned success=false:', captureResult.error)
         return
@@ -1243,7 +1306,10 @@ function isAlreadyExists(err: unknown): boolean {
         storage_path: storagePath,
         task_id: taskId,
         time_session_id: timeSessionId,
-        idempotency_key: idempotencyKey
+        idempotency_key: idempotencyKey,
+        // How much of the screen changed since the previous screenshot; null for
+        // the first one of a session. Context for a reviewer, never hours.
+        screen_change_pct: captureResult.changePct ?? null
       }
 
       // Phase 4D: Handle Offline Screenshot
@@ -1331,16 +1397,20 @@ function isAlreadyExists(err: unknown): boolean {
         const stats = await window.electronAPI?.getActivityStats()
         if (!stats) return
         
-        // Calculate active seconds logic
         const totalInputs = stats.keyboardCount + stats.mouseCount + stats.mouseClickCount
-        
-        // Simple logic for beta: 
-        // We poll every 60 seconds. 
-        // If there is ANY input in this minute, we count it as 60 active seconds (or proportionally).
-        // Let's say if totalInputs > 0, active_seconds = 60, else 0.
-        const active_seconds = totalInputs > 0 ? 60 : 0
-        const idle_seconds = totalInputs > 0 ? 0 : 60
-        const activity_percentage = Math.round((active_seconds / 60) * 100)
+
+        // Active seconds are counted in 10-second windows (owner, 22 Sep 2026): a
+        // minute with one nudge is 10 active seconds, not 60. The row covers the
+        // real stretch since the last one, at most a minute — anything longer means
+        // the computer slept, and the sleep is recorded on its own.
+        const windowEnd = stats.windowEnd ?? Date.now()
+        const windowStart = Math.max(stats.windowStart ?? windowEnd - 60000, windowEnd - 60000)
+        const windowSeconds = Math.max(1, Math.round((windowEnd - windowStart) / 1000))
+        const active_seconds = typeof stats.activeWindows === 'number'
+          ? Math.min(windowSeconds, stats.activeWindows * 10)
+          : (totalInputs > 0 ? windowSeconds : 0)
+        const idle_seconds = windowSeconds - active_seconds
+        const activity_percentage = Math.round((active_seconds / windowSeconds) * 100)
 
         setActivePercentage(activity_percentage)
 
@@ -1447,18 +1517,15 @@ function isAlreadyExists(err: unknown): boolean {
           }
         }
 
-        const now = new Date()
-        const oneMinuteAgo = new Date(now.getTime() - 60000)
-        
         const logData = {
           user_id: currSession.user.id,
           device_id: currActiveSession.device_id || null,
           attendance_session_id: currActiveSession.id,
           task_id: activeWebTaskIdRef.current,
           time_session_id: activeTimeSessionIdRef.current,
-          captured_at: now.toISOString(),
-          interval_start: oneMinuteAgo.toISOString(),
-          interval_end: now.toISOString(),
+          captured_at: new Date(windowEnd).toISOString(),
+          interval_start: new Date(windowStart).toISOString(),
+          interval_end: new Date(windowEnd).toISOString(),
           keyboard_count: stats.keyboardCount,
           mouse_count: stats.mouseCount,
           mouse_click_count: stats.mouseClickCount,
@@ -1499,8 +1566,9 @@ function isAlreadyExists(err: unknown): boolean {
       }
     }
 
-    // Run immediately so the first minute of work is captured, then every 60s thereafter
-    runCheck()
+    // Every 60s. Input is counted continuously from clock-in, so the first row a
+    // minute in covers the first minute; an immediate run only logged an empty
+    // row and counted an idle minute that never happened.
     activityTrackerIntervalRef.current = setInterval(runCheck, 60000)
   }
 
@@ -1658,6 +1726,9 @@ function isAlreadyExists(err: unknown): boolean {
           <p className="text-[13px] text-slate-500 leading-relaxed px-4 font-light">
             Your last attendance session is still active, but the heartbeat was missed. Choose how you want to continue.
           </p>
+          <p className="text-[12px] text-slate-500 leading-relaxed px-4">
+            If there's been no activity for over an hour, Continue starts a new session now, and the time away isn't counted.
+          </p>
           <div className="bg-white backdrop-blur-md p-4 rounded-xl border border-slate-200 text-left text-[12px] text-slate-600 space-y-2 max-w-sm mx-auto shadow-xl">
             <p><strong className="text-slate-900 font-medium">Clocked In:</strong> {new Date(recoverySession.clock_in).toLocaleString()}</p>
             <p><strong className="text-slate-900 font-medium">Last Heartbeat:</strong> {new Date(recoverySession.updated_at).toLocaleString()}</p>
@@ -1777,7 +1848,7 @@ function isAlreadyExists(err: unknown): boolean {
           </svg>
           <div className="absolute inset-0 flex flex-col items-center justify-center">
             <div className={`text-[9.5px] font-semibold tracking-[.16em] uppercase mb-1.5 ${onBreak ? 'text-[#E8890C]' : 'text-[#B4B4B4]'}`}>
-              {onBreak ? (breakNudged ? 'Still on break?' : 'On a break') : isClockedIn ? 'Elapsed' : 'Not started'}
+              {onBreak ? (breakNudged ? 'Still on break?' : BREAK_TITLE[activeBreak?.kind ?? 'regular']) : isClockedIn ? 'Elapsed' : 'Not started'}
             </div>
             <div ref={timerFitRef}
                  style={timerScale < 1 ? { transform: `scale(${timerScale})` } : undefined}
@@ -1830,9 +1901,15 @@ function isAlreadyExists(err: unknown): boolean {
             </>
           ) : (
             <>
-              <button onClick={startBreak} disabled={breakBusy}
+              {isFriday() && (
+                <button onClick={() => startBreak('friday_main')} disabled={breakBusy}
+                  className="flex-1 h-[46px] rounded-xl bg-white border border-[#EAEAEA] text-[13.5px] font-medium disabled:opacity-40 hover:bg-[#FAFAFA] transition-colors">
+                  Friday break
+                </button>
+              )}
+              <button onClick={() => startBreak('regular')} disabled={breakBusy}
                 className="flex-1 h-[46px] rounded-xl bg-white border border-[#EAEAEA] text-[13.5px] font-medium disabled:opacity-40 hover:bg-[#FAFAFA] transition-colors">
-                Take a break
+                {isFriday() ? 'Short break' : 'Take a break'}
               </button>
               <button onClick={handleClockOut} disabled={syncing}
                 className="flex-1 h-[46px] rounded-xl bg-[#0A0A0A] text-white text-[13.5px] font-medium disabled:opacity-40 active:scale-[.99] transition-all">
