@@ -369,11 +369,15 @@ if (!gotTheLock) {
 
   // Locking the screen means going on a break (owner, 22 Sep 2026); the renderer
   // starts one on lock and ends it on unlock.
+  // The moment goes with the event: a computer that locks and then SLEEPS only
+  // delivers this to the window on wake, and without the timestamp the break
+  // would start when the person came back — measured 23-25 Sep, every lock break
+  // was 0 minutes for exactly that reason.
   powerMonitor.on('lock-screen', () => {
-    if (mainWindow) mainWindow.webContents.send('power-state-change', 'lock');
+    if (mainWindow) mainWindow.webContents.send('power-state-change', 'lock', Date.now());
   });
   powerMonitor.on('unlock-screen', () => {
-    if (mainWindow) mainWindow.webContents.send('power-state-change', 'unlock');
+    if (mainWindow) mainWindow.webContents.send('power-state-change', 'unlock', Date.now());
   });
 
   app.on('activate', () => {

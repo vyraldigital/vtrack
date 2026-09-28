@@ -201,7 +201,7 @@ function isAlreadyExists(err: unknown): boolean {
   // A break the screen lock is starting right now: an unlock that arrives before
   // the server answers waits for it, then ends it.
   const lockBreakRef = useRef<Promise<void> | null>(null)
-  const lockHandlerRef = useRef<((state: 'lock' | 'unlock') => void) | null>(null)
+  const lockHandlerRef = useRef<((state: 'lock' | 'unlock', at?: number) => void) | null>(null)
   // started_at comes from the SERVER clock; Date.now() is this machine's. Even a
   // second of drift (or the RPC round trip) made the timer render "-1:-1" on the
   // first tick of every break. Worse, a machine running FAST would compute a huge
@@ -264,7 +264,7 @@ function isAlreadyExists(err: unknown): boolean {
       window.electronAPI.getPermissionsStatus().then(setPermissions)
 
       // Listen for system wake/resume, and screen lock/unlock
-      window.electronAPI.onPowerStateChange((state) => {
+      window.electronAPI.onPowerStateChange((state, at) => {
         if (state === 'resume') {
           console.log('System resumed from sleep, refreshing state...')
           checkActiveSession()
@@ -272,7 +272,7 @@ function isAlreadyExists(err: unknown): boolean {
         } else if (state === 'lock' || state === 'unlock') {
           // Through a ref: this listener is registered once, and would otherwise
           // see the state from the first render forever.
-          lockHandlerRef.current?.(state)
+          lockHandlerRef.current?.(state, at)
         }
       })
     }
@@ -835,10 +835,13 @@ function isAlreadyExists(err: unknown): boolean {
   // Locking the screen while clocked in starts a break at the moment of locking;
   // unlocking ends it. A break already running (a Friday or a regular one) is left
   // alone, and unlocking doesn't end it — only a lock's own break ends on unlock.
-  const handleLockChange = async (state: 'lock' | 'unlock') => {
+  const handleLockChange = async (state: 'lock' | 'unlock', at?: number) => {
     if (state === 'lock') {
       if (!activeSessionRef.current || activeBreakRef.current) return
-      const starting = startBreak('screen_lock', Date.now(), true)
+      // `at` is when the screen actually locked. On a machine that slept while
+      // locked, this handler only runs on wake, so Date.now() would start the
+      // break when they came back and record a 0-minute one.
+      const starting = startBreak('screen_lock', at ?? Date.now(), true)
       lockBreakRef.current = starting
       try { await starting } finally { if (lockBreakRef.current === starting) lockBreakRef.current = null }
       return
@@ -846,7 +849,7 @@ function isAlreadyExists(err: unknown): boolean {
     if (lockBreakRef.current) await lockBreakRef.current
     if (activeBreakRef.current?.kind === 'screen_lock') await endBreak('unlock')
   }
-  useEffect(() => { lockHandlerRef.current = (state) => { void handleLockChange(state) } })
+  useEffect(() => { lockHandlerRef.current = (state, at) => { void handleLockChange(state, at) } })
 
   // Fired once when a break reaches BREAK_LIMIT_MINUTES.
   const handleBreakLimit = async () => {

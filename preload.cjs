@@ -22,7 +22,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   forceSyncRetry: () => ipcRenderer.invoke('force-sync-retry'),
 
   onPowerStateChange: (callback) => {
-    const listener = (event, state) => callback(state);
+    const listener = (event, state, at) => callback(state, at);
     ipcRenderer.on('power-state-change', listener);
     return () => ipcRenderer.removeListener('power-state-change', listener);
   },

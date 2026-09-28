@@ -57,7 +57,8 @@ export interface ElectronAPI {
     quarantinedDetail: { type: string; error: string; since: string | null }[]
   }>;
   forceSyncRetry: () => Promise<number>;
-  onPowerStateChange: (callback: (state: 'suspend' | 'resume' | 'lock' | 'unlock') => void) => () => void;
+  /** `at` is epoch ms from the main process: when it happened, not when the window heard. */
+  onPowerStateChange: (callback: (state: 'suspend' | 'resume' | 'lock' | 'unlock', at?: number) => void) => () => void;
   getAppVersion: () => Promise<string>;
   checkForUpdates: () => Promise<{ success: boolean; version?: string; error?: string }>;
   onUpdaterStatus: (callback: (text: string) => void) => () => void;
