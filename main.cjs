@@ -483,7 +483,8 @@ const SAMPLE_W = 64;
 const SAMPLE_H = 36;
 // Grey-level difference that counts as a changed pixel; below it is noise.
 const PIXEL_CHANGE_LEVEL = 20;
-let lastScreenSample = null;
+// One previous sample per display, so each monitor is compared with itself.
+const lastScreenSamples = new Map();
 let lastSampleSession = null;
 
 function screenSample(image) {
@@ -505,6 +506,26 @@ function changedPct(prev, next) {
   return Math.round((changed * 100) / next.length);
 }
 
+// Which display is the person actually working on? The focused window answers
+// it; the mouse answers it when there is no focused window to read. Null means
+// we could not tell, and the primary screen is used.
+async function activeDisplayId() {
+  const { screen } = require('electron');
+  try {
+    const win = await activeWindow({ accessibilityPermission: false, screenRecordingPermission: false });
+    const b = win?.bounds;
+    if (b && Number.isFinite(b.x) && Number.isFinite(b.y)) {
+      const d = screen.getDisplayMatching({ x: b.x, y: b.y, width: b.width || 1, height: b.height || 1 });
+      if (d) return d.id;
+    }
+  } catch { /* fall through to the cursor */ }
+  try {
+    const d = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    if (d) return d.id;
+  } catch { /* fall through to the primary screen */ }
+  return null;
+}
+
 ipcMain.handle('capture-screen', async (event, sessionId) => {
   try {
     const { desktopCapturer } = require('electron');
@@ -517,9 +538,14 @@ ipcMain.handle('capture-screen', async (event, sessionId) => {
       throw new Error('No screen sources found');
     }
 
-    // Capture the primary screen (first source in list)
-    const primarySource = sources[0];
-    const thumbnail = primarySource.thumbnail;
+    // On two monitors the primary screen is often the idle one: the editor is in
+    // Premiere on the second display while the first shows a static desktop.
+    // Capturing the primary made real work look like an empty desk, and with the
+    // screen-change number it would read "static screen" all day (owner,
+    // 11 Oct 2026). Capture the display they are actually on.
+    const wantedId = sources.length > 1 ? await activeDisplayId() : null;
+    const chosen = (wantedId !== null && sources.find(s => String(s.display_id) === String(wantedId))) || sources[0];
+    const thumbnail = chosen.thumbnail;
 
     if (thumbnail.isEmpty()) {
       throw new Error('Screen capture is empty (possible missing screen recording permission)');
@@ -542,8 +568,12 @@ ipcMain.handle('capture-screen', async (event, sessionId) => {
     let changePct = null;
     try {
       const sample = screenSample(thumbnail);
-      if (sessionId && sessionId === lastSampleSession) changePct = changedPct(lastScreenSample, sample);
-      lastScreenSample = sample;
+      // Keyed per display: moving from one monitor to the other is not "the
+      // screen changed 100%".
+      const key = `${sessionId || 'none'}:${chosen.display_id || 'primary'}`;
+      if (sessionId && sessionId === lastSampleSession) changePct = changedPct(lastScreenSamples.get(key), sample);
+      if (sessionId !== lastSampleSession) lastScreenSamples.clear();
+      lastScreenSamples.set(key, sample);
       lastSampleSession = sessionId || null;
     } catch (e) {
       console.warn('Screen change sample failed:', e);
