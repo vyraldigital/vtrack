@@ -63,6 +63,12 @@ export default function App() {
   const [showSessionHistory, setShowSessionHistory] = useState(false)
   const [activityStatus, setActivityStatus] = useState<'Active' | 'Idle' | 'Disabled'>('Disabled')
   const [activePercentage, setActivePercentage] = useState<number>(0)
+  // The number on screen is a 10-minute rolling average, not the last minute
+  // (owner, 12 Oct 2026). Minute by minute it read 100 → 83 → 50 → 100, which
+  // looks like a verdict on the last 60 seconds and isn't one. What is RECORDED
+  // is unchanged: every row still carries that minute's exact seconds.
+  const ACTIVITY_DISPLAY_MINUTES = 10
+  const recentActivityRef = useRef<Array<{ window: number; active: number }>>([])
   // Shown right after clock-in when there's no in-progress task to resume.
   const [clockInNudge, setClockInNudge] = useState<string | null>(null)
 
@@ -1415,7 +1421,12 @@ function isAlreadyExists(err: unknown): boolean {
         const idle_seconds = windowSeconds - active_seconds
         const activity_percentage = Math.round((active_seconds / windowSeconds) * 100)
 
-        setActivePercentage(activity_percentage)
+        const recent = recentActivityRef.current
+        recent.push({ window: windowSeconds, active: active_seconds })
+        if (recent.length > ACTIVITY_DISPLAY_MINUTES) recent.shift()
+        const windowTotal = recent.reduce((t, r) => t + r.window, 0)
+        const activeTotal = recent.reduce((t, r) => t + r.active, 0)
+        setActivePercentage(windowTotal > 0 ? Math.round((activeTotal / windowTotal) * 100) : 0)
 
         if (totalInputs === 0) {
           idleMinutesRef.current += 1
@@ -1600,6 +1611,7 @@ function isAlreadyExists(err: unknown): boolean {
     setActiveWebTask('No active web task')
     setActivityStatus('Disabled')
     setActivePercentage(0)
+    recentActivityRef.current = []
     idleMinutesRef.current = 0
     if (window.electronAPI && window.electronAPI.setActivityTracking) {
       window.electronAPI.setActivityTracking(false)
@@ -1928,7 +1940,11 @@ function isAlreadyExists(err: unknown): boolean {
             <b className="text-[#0A0A0A] font-semibold tabular-nums">{todaySessions.length}</b> sessions
           </button>
           {profile?.activity_tracking_enabled && activityStatus !== 'Disabled' && (
-            <><span className="text-[#B4B4B4] mx-[7px]">·</span><b className="text-[#0A0A0A] font-semibold tabular-nums">{activePercentage}%</b> activity</>
+            <>
+              <span className="text-[#B4B4B4] mx-[7px]">·</span>
+              <b className="text-[#0A0A0A] font-semibold tabular-nums">{activePercentage}%</b>
+              <span title="Keyboard and mouse over the last 10 minutes. It never changes your hours."> activity, last 10 min</span>
+            </>
           )}
           {breaksToday.count > 0 && (
             <><span className="text-[#B4B4B4] mx-[7px]">·</span><b className="text-[#0A0A0A] font-semibold tabular-nums">{breaksToday.count}</b> {breaksToday.count === 1 ? 'break' : 'breaks'}, {breaksToday.minutes}m</>
