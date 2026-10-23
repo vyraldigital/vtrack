@@ -38,8 +38,10 @@ export interface ElectronAPI {
     /** Epoch ms: the stretch these counts cover. */
     windowStart: number;
     windowEnd: number;
-    /** 10-second windows in that stretch that saw any input. */
+    /** Activity windows in that stretch that saw any input. */
     activeWindows: number;
+    /** How long one of those windows is, in ms (30,000 since Oct 2026). */
+    activeWindowMs?: number;
     activeApp: string | null;
     activeWindowTitle: string | null;
   }>;

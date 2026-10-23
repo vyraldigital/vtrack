@@ -62,7 +62,8 @@ export default function App() {
   const [todaySessions, setTodaySessions] = useState<TodaySession[]>([])
   const [showSessionHistory, setShowSessionHistory] = useState(false)
   const [activityStatus, setActivityStatus] = useState<'Active' | 'Idle' | 'Disabled'>('Disabled')
-  const [activePercentage, setActivePercentage] = useState<number>(0)
+  // Null until the first minute is measured, so nobody sees a score before there is one.
+  const [activePercentage, setActivePercentage] = useState<number | null>(null)
   // The number on screen is a 10-minute rolling average, not the last minute
   // (owner, 12 Oct 2026). Minute by minute it read 100 → 83 → 50 → 100, which
   // looks like a verdict on the last 60 seconds and isn't one. What is RECORDED
@@ -177,6 +178,11 @@ export default function App() {
 // what it was. 'screen_lock' starts itself when the screen locks — locking means
 // going on a break (owner, 22 Sep 2026) — and ends on unlock.
 type BreakKind = 'regular' | 'friday_main' | 'screen_lock'
+
+// Activity as a word, the same bands as vOps (lib/activity.ts): editors see how
+// the last few minutes went, not a percentage to watch (owner, 23 Oct 2026).
+const activityWord = (pct: number | null) =>
+  pct === null ? 'Measuring…' : pct >= 80 ? 'Focused' : pct >= 60 ? 'Steady' : 'Check in'
 type OpenBreak = { id: string; started_at: string; kind?: BreakKind }
 const BREAK_TITLE: Record<BreakKind, string> = {
   regular: 'On a break',
@@ -853,7 +859,38 @@ function isAlreadyExists(err: unknown): boolean {
       return
     }
     if (lockBreakRef.current) await lockBreakRef.current
-    if (activeBreakRef.current?.kind === 'screen_lock') await endBreak('unlock')
+    if (activeBreakRef.current?.kind === 'screen_lock') { await endBreak('unlock'); return }
+    if (!activeBreakRef.current) await endLostLockBreak()
+  }
+
+  // A lock break the server opened but this PC never heard back about — the
+  // request landed, the reply didn't — has nothing here to end it, so it stayed
+  // open while the person worked (15 Oct 2026: 2h50m of work recorded as a break,
+  // then the break ran on until the next clock-in). Unlocking ends exactly that
+  // break; any other kind of break is left alone.
+  const endLostLockBreak = async () => {
+    const uid = sessionRef.current?.user?.id
+    if (!uid || !activeSessionRef.current || !navigator.onLine) return
+    try {
+      const { data } = await supabase
+        .from('work_breaks')
+        .select('id, kind')
+        .eq('user_id', uid)
+        .is('ended_at', null)
+        .limit(1)
+      const lost = data?.[0] as { id: string; kind: string } | undefined
+      if (!lost || lost.kind !== 'screen_lock' || endedBreakIdsRef.current.has(lost.id)) return
+      endedBreakIdsRef.current.add(lost.id)
+      const { error } = await supabase.rpc('desktop_break_end', {
+        p_reason: 'unlock',
+        p_ended_at: new Date().toISOString(),
+        p_break_id: lost.id,
+      })
+      if (error) await queueRecord('break_end', { reason: 'unlock', ended_at: new Date().toISOString(), break_id: lost.id })
+      refreshBreaksToday()
+    } catch (e) {
+      console.error('Could not check for a lock break left open:', e)
+    }
   }
   useEffect(() => { lockHandlerRef.current = (state, at) => { void handleLockChange(state, at) } })
 
@@ -1408,25 +1445,31 @@ function isAlreadyExists(err: unknown): boolean {
         
         const totalInputs = stats.keyboardCount + stats.mouseCount + stats.mouseClickCount
 
-        // Active seconds are counted in 10-second windows (owner, 22 Sep 2026): a
-        // minute with one nudge is 10 active seconds, not 60. The row covers the
+        // Active seconds are counted in 30-second windows (owner, 23 Oct 2026): a
+        // minute with one nudge is 30 active seconds, not 60. The row covers the
         // real stretch since the last one, at most a minute — anything longer means
         // the computer slept, and the sleep is recorded on its own.
         const windowEnd = stats.windowEnd ?? Date.now()
         const windowStart = Math.max(stats.windowStart ?? windowEnd - 60000, windowEnd - 60000)
         const windowSeconds = Math.max(1, Math.round((windowEnd - windowStart) / 1000))
+        const windowCredit = (stats.activeWindowMs ?? 30000) / 1000
         const active_seconds = typeof stats.activeWindows === 'number'
-          ? Math.min(windowSeconds, stats.activeWindows * 10)
+          ? Math.min(windowSeconds, stats.activeWindows * windowCredit)
           : (totalInputs > 0 ? windowSeconds : 0)
         const idle_seconds = windowSeconds - active_seconds
         const activity_percentage = Math.round((active_seconds / windowSeconds) * 100)
 
-        const recent = recentActivityRef.current
-        recent.push({ window: windowSeconds, active: active_seconds })
-        if (recent.length > ACTIVITY_DISPLAY_MINUTES) recent.shift()
-        const windowTotal = recent.reduce((t, r) => t + r.window, 0)
-        const activeTotal = recent.reduce((t, r) => t + r.active, 0)
-        setActivePercentage(windowTotal > 0 ? Math.round((activeTotal / windowTotal) * 100) : 0)
+        // The meter leaves breaks out, as vOps does: coming back from lunch must not
+        // show ten minutes of "Check in". The minute is still sent below — vOps
+        // marks it as a break minute, and it still proves the PC was awake.
+        if (!activeBreakRef.current) {
+          const recent = recentActivityRef.current
+          recent.push({ window: windowSeconds, active: active_seconds })
+          if (recent.length > ACTIVITY_DISPLAY_MINUTES) recent.shift()
+          const windowTotal = recent.reduce((t, r) => t + r.window, 0)
+          const activeTotal = recent.reduce((t, r) => t + r.active, 0)
+          setActivePercentage(windowTotal > 0 ? Math.round((activeTotal / windowTotal) * 100) : null)
+        }
 
         if (totalInputs === 0) {
           idleMinutesRef.current += 1
@@ -1610,7 +1653,7 @@ function isAlreadyExists(err: unknown): boolean {
     setTimerStr('00:00:00')
     setActiveWebTask('No active web task')
     setActivityStatus('Disabled')
-    setActivePercentage(0)
+    setActivePercentage(null)
     recentActivityRef.current = []
     idleMinutesRef.current = 0
     if (window.electronAPI && window.electronAPI.setActivityTracking) {
@@ -1942,8 +1985,8 @@ function isAlreadyExists(err: unknown): boolean {
           {profile?.activity_tracking_enabled && activityStatus !== 'Disabled' && (
             <>
               <span className="text-[#B4B4B4] mx-[7px]">·</span>
-              <b className="text-[#0A0A0A] font-semibold tabular-nums">{activePercentage}%</b>
-              <span title="Keyboard and mouse over the last 10 minutes. It never changes your hours."> activity, last 10 min</span>
+              <b className="text-[#0A0A0A] font-semibold">{activityWord(activePercentage)}</b>
+              <span title="Keyboard and mouse over the last 10 minutes, breaks left out. Focused is 80% and up, Steady 60–79%, Check in under 60%. It never changes your hours."> last 10 min</span>
             </>
           )}
           {breaksToday.count > 0 && (

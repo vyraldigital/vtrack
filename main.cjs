@@ -35,11 +35,13 @@ let queueDb = null;
 // Cap at 10 events/second (one per 100 ms) so the stored value stays human-readable.
 let _lastMouseMove = 0;
 
-// Activity is measured in 10-second windows (owner, 22 Sep 2026): a window with
-// any keyboard or mouse input is 10 active seconds, so a minute with a single
-// nudge counts 10 seconds, not the whole minute. Windows are numbered from the
-// epoch; the set holds the ones that saw input since the last stats read.
-const ACTIVITY_WINDOW_MS = 10000;
+// Activity is measured in 30-second windows (owner, 23 Oct 2026): a window with
+// any keyboard or mouse input is 30 active seconds. One nudge still can't buy a
+// whole minute, but stopping for a few seconds to watch a cut or think no longer
+// counts against anyone — the 10-second windows used from 22 Sep did, costing
+// editors 10–18 points for normal editing. Windows are numbered from the epoch;
+// the set holds the ones that saw input since the last stats read.
+const ACTIVITY_WINDOW_MS = 30000;
 let activeWindows = new Set();
 let statsWindowStart = Date.now();
 // The window in progress at the last read, if it had input: it was counted then,
@@ -666,10 +668,12 @@ ipcMain.handle('get-activity-stats', async () => {
     keyboardCount,
     mouseCount,
     mouseClickCount,
-    // The stretch these numbers cover, and how many 10-second windows in it had input.
+    // The stretch these numbers cover, how many windows in it had input, and how
+    // long one window is — so the renderer never has to assume it.
     windowStart: statsWindowStart,
     windowEnd: now,
     activeWindows: windows,
+    activeWindowMs: ACTIVITY_WINDOW_MS,
     activeApp: null,
     activeWindowTitle: null
   };
