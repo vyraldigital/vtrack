@@ -167,14 +167,17 @@ export default function App() {
   // A break is a declared interval; the task timer and attendance session keep
   // running through it (breaks are paid work here), and the server excuses the
   // interval from the 30-minute dead-gap trim. Two thresholds:
-  //   50m → friendly nudge (once)
-  //   60m → wrap up: if there was NO real input the person is genuinely away, so
+  //   15, 30, 45m → friendly reminders (owner, 3 Nov 2026; was one at 50m)
+  //   60m → the fourth and last: wrap up: if there was NO real input the person is genuinely away, so
   //         we credit 30m and clock out; if they ARE active they simply forgot to
   //         switch back, so we keep every minute and flag it for review.
-  const BREAK_NUDGE_MINUTES = 50
+  const BREAK_REMINDER_MINUTES = [15, 30, 45]
+  // The server's "nudged" mark means a long break, as it did at 50m: set it on
+  // the last reminder, not the first.
+  const BREAK_NUDGE_MINUTES = 45
   const BREAK_LIMIT_MINUTES = 60
   const BREAK_CREDIT_MINUTES = 30
-// Every break is paid and follows the same 50/60-minute rules; the kind only says
+// Every break is paid and follows the same reminder and 60-minute rules; the kind only says
 // what it was. 'screen_lock' starts itself when the screen locks — locking means
 // going on a break (owner, 22 Sep 2026) — and ends on unlock.
 type BreakKind = 'regular' | 'friday_main' | 'screen_lock'
@@ -204,9 +207,22 @@ function isAlreadyExists(err: unknown): boolean {
   const e = err as { status?: number; statusCode?: string | number; message?: string } | null
   return e?.status === 409 || String(e?.statusCode) === '409' || /already exists|duplicate/i.test(e?.message ?? '')
 }
+
+// A record kept on this device names the computer it came from. If that computer's
+// entry was removed on the server (duplicate devices are cleaned up), the server
+// refuses the record forever. The record still matters more than the link, so
+// send it again without the device.
+async function insertKeepingRecord(table: 'activity_logs' | 'screenshots', payload: Record<string, unknown>) {
+  const res = await supabase.from(table).insert(payload)
+  if (res.error?.code === '23503' && /device_id/.test(res.error.message) && payload.device_id) {
+    return supabase.from(table).insert({ ...payload, device_id: null })
+  }
+  return res
+}
   const [activeBreak, setActiveBreak] = useState<OpenBreak | null>(null)
   const [breakStr, setBreakStr] = useState('0:00')
-  const [breakNudged, setBreakNudged] = useState(false)
+  // Minutes of the last reminder shown for this break; 0 = none yet.
+  const [breakReminder, setBreakReminder] = useState(0)
   const [breakBusy, setBreakBusy] = useState(false)
   const [breaksToday, setBreaksToday] = useState<{ count: number; minutes: number }>({ count: 0, minutes: 0 })
   const activeBreakRef = useRef<OpenBreak | null>(null)
@@ -373,7 +389,7 @@ function isAlreadyExists(err: unknown): boolean {
 
           try {
             if (item.type === 'activity_log') {
-              const { error } = await supabase.from('activity_logs').insert(item.payload_json)
+              const { error } = await insertKeepingRecord('activity_logs', item.payload_json)
               if (error) {
                 if (error.code === '23505') success = true // already there (idempotency_key)
                 else throw error
@@ -391,7 +407,7 @@ function isAlreadyExists(err: unknown): boolean {
               const { error: uploadError } = await supabase.storage.from('desktop-screenshots').upload(item.payload_json.storage_path, readResult.buffer, { contentType: 'image/jpeg', upsert: false })
               if (uploadError && !isAlreadyExists(uploadError)) throw uploadError
 
-              const { error: dbError } = await supabase.from('screenshots').insert(item.payload_json)
+              const { error: dbError } = await insertKeepingRecord('screenshots', item.payload_json)
               if (dbError) {
                 if (dbError.code === '23505') success = true
                 else throw dbError
@@ -809,7 +825,7 @@ function isAlreadyExists(err: unknown): boolean {
       }
       setActiveBreak(brk); activeBreakRef.current = brk
       breakAnchorRef.current = { id: brk.id, localStart: startedAt ?? Date.now() }
-      setBreakNudged(false); breakLimitHandledRef.current = false
+      setBreakReminder(0); breakLimitHandledRef.current = false
     } catch (e: any) {
       if (!quiet) setSyncError(e?.message || 'Could not start the break. Please try again.')
       else console.error('Could not start a break on screen lock:', e)
@@ -838,7 +854,7 @@ function isAlreadyExists(err: unknown): boolean {
       if (!sent) await queueRecord('break_end', { reason, ended_at: endedAt, break_id: brk.id })
     } finally {
       setActiveBreak(null); activeBreakRef.current = null
-      setBreakNudged(false); breakLimitHandledRef.current = false
+      setBreakReminder(0); breakLimitHandledRef.current = false
       setBreakBusy(false)
       refreshBreaksToday()
     }
@@ -907,6 +923,7 @@ function isAlreadyExists(err: unknown): boolean {
       // They're clearly working and just forgot to switch back — keep every
       // minute, flag the session so a human can verify it against screenshots.
       await endBreak('manual')
+      try { if ('Notification' in window && Notification.permission === 'granted') new Notification('vTrack — Break ended', { body: "Your break passed an hour while you were working, so we ended it. Your time is all counted." }) } catch {}
       const tsId = activeTimeSessionIdRef.current
       if (tsId) {
         const reason = 'Break mode left on past 60m while active — verify against screenshots'
@@ -989,7 +1006,7 @@ function isAlreadyExists(err: unknown): boolean {
     return Math.max(0, Date.now() - new Date(brk.started_at).getTime())
   }
 
-  // Break ticker: drives the on-screen timer, the 50m nudge and the 60m wrap-up.
+  // Break ticker: drives the on-screen timer, the reminders and the 60m wrap-up.
   useEffect(() => {
     if (!activeBreak) { setBreakStr('0:00'); return }
     const tick = async () => {
@@ -997,12 +1014,17 @@ function isAlreadyExists(err: unknown): boolean {
       const mins = Math.floor(ms / 60000)
       setBreakStr(`${mins}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`)
 
-      if (mins >= BREAK_NUDGE_MINUTES && !breakNudged) {
-        setBreakNudged(true)
-        try { await supabase.rpc('desktop_break_nudge') } catch { /* best-effort */ }
+      // The latest reminder due. After a relaunch mid-break this shows one, not
+      // every reminder missed while vTrack was closed.
+      const due = BREAK_REMINDER_MINUTES.filter(m => mins >= m).pop() ?? 0
+      if (due > breakReminder) {
+        setBreakReminder(due)
+        if (due >= BREAK_NUDGE_MINUTES) {
+          try { await supabase.rpc('desktop_break_nudge') } catch { /* best-effort */ }
+        }
         try {
           if ('Notification' in window && Notification.permission === 'granted') {
-            new Notification('vTrack', { body: "Still on break? No rush — just tap I'm back when you return." })
+            new Notification('vTrack', { body: `On break for ${due} minutes. No rush, just tap I'm back when you return.` })
           }
         } catch { /* notifications are optional */ }
       }
@@ -1015,7 +1037,7 @@ function isAlreadyExists(err: unknown): boolean {
     tick()
     const iv = setInterval(tick, 1000)
     return () => clearInterval(iv)
-  }, [activeBreak, breakNudged])
+  }, [activeBreak, breakReminder])
 
   const handleClockOut = async () => {
     if (!activeSession) return
@@ -1906,7 +1928,7 @@ function isAlreadyExists(err: unknown): boolean {
           </svg>
           <div className="absolute inset-0 flex flex-col items-center justify-center">
             <div className={`text-[9.5px] font-semibold tracking-[.16em] uppercase mb-1.5 ${onBreak ? 'text-[#E8890C]' : 'text-[#B4B4B4]'}`}>
-              {onBreak ? (breakNudged ? 'Still on break?' : BREAK_TITLE[activeBreak?.kind ?? 'regular']) : isClockedIn ? 'Elapsed' : 'Not started'}
+              {onBreak ? (breakReminder ? 'Still on break?' : BREAK_TITLE[activeBreak?.kind ?? 'regular']) : isClockedIn ? 'Elapsed' : 'Not started'}
             </div>
             <div ref={timerFitRef}
                  style={timerScale < 1 ? { transform: `scale(${timerScale})` } : undefined}
@@ -2024,9 +2046,9 @@ function isAlreadyExists(err: unknown): boolean {
         )}
 
         {onBreak && (
-          breakNudged ? (
+          breakReminder ? (
             <div className="mt-4 px-3.5 py-3 rounded-xl bg-[#FFFBF4] border border-[#F6E4C8] text-[12px] leading-relaxed text-[#525252]">
-              Hey — you&apos;ve been away about <b className="text-[#0A0A0A] font-semibold">50 minutes</b>. No rush, just tap <b className="text-[#0A0A0A] font-semibold">I&apos;m back</b> when you return. If we don&apos;t hear from you by 60 min we&apos;ll clock you out so your hours stay accurate.
+              Hey — you&apos;ve been away about <b className="text-[#0A0A0A] font-semibold">{breakReminder} minutes</b>. No rush, just tap <b className="text-[#0A0A0A] font-semibold">I&apos;m back</b> when you return. If we don&apos;t hear from you by 60 min we&apos;ll clock you out so your hours stay accurate.
             </div>
           ) : (
             <div className="mt-4 px-3.5 py-3 rounded-xl bg-[#FAFAFA] border border-[#EAEAEA] text-[12px] leading-relaxed text-[#525252]">
